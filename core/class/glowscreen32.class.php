@@ -88,6 +88,48 @@ class glowscreen32 extends eqLogic {
      */
     const CONTACT_GRANULARITY = 60;
 
+    /*
+     * ---------------------------------------------------------------- OTA
+     *
+     * Le dépôt du firmware, sous « data/ » du plugin. Il est EXCLU du
+     * déploiement (.deployignore : data/firmware/*.bin) : sans cette exclusion,
+     * le rsync --delete de deploy-plugin.sh effacerait à chaque déploiement un
+     * binaire que le dépôt de développement ne contient pas.
+     */
+    const FIRMWARE_DIR = 'firmware';
+
+    /*
+     * Taille maximale acceptée au dépôt. La carte n'a que 4 Mo de flash, dont
+     * deux partitions d'application : au-delà de ~1,9 Mo l'image ne tient
+     * déjà plus. Refuser à 4 Mo attrape la vraie faute — un fichier qui n'est
+     * pas un firmware — sans se substituer au partitionnement.
+     */
+    const FIRMWARE_MAX_SIZE = 4194304;
+
+    /*
+     * Les deux nombres magiques d'une image d'application ESP32.
+     *
+     * Le premier octet du fichier vaut 0xE9 : c'est l'en-tête d'image lu par
+     * le chargeur d'amorçage. Un fichier qui ne commence pas par là n'est pas
+     * un firmware, et le déposer reviendrait à promettre à la carte une image
+     * qu'elle écrirait dans sa partition inactive avant de ne plus démarrer.
+     *
+     * À l'offset 0x20 commence « esp_app_desc_t », dont le mot magique vaut
+     * 0xABCD5432 et dont le champ « version » occupe 32 octets — à l'offset
+     * 0x10 DANS le descripteur, soit 0x30 dans le fichier, derrière
+     * « secure_version » et deux mots réservés. Ne pas confondre avec
+     * « project_name », qui vient juste après et que l'on lirait à sa place si
+     * l'on comptait l'offset depuis le début du fichier.
+     * C'est là qu'on lit la version du firmware sans rien demander à personne :
+     * la version affichée par Jeedom est alors CELLE QUI EST DANS LE BINAIRE,
+     * et non celle qu'un opérateur a retapée dans un formulaire.
+     */
+    const ESP_IMAGE_MAGIC        = 0xE9;
+    const ESP_APP_DESC_MAGIC     = 0xABCD5432;
+    const ESP_APP_DESC_OFFSET    = 0x20;
+    const ESP_APP_VERSION_OFFSET = 0x10;
+    const ESP_APP_VERSION_LENGTH = 32;
+
     /* ===================================================== ADRESSE MAC */
 
     /*
@@ -864,6 +906,449 @@ class glowscreen32 extends eqLogic {
         return true;
     }
 
+    /* =========================================================== OTA
+     *
+     * La mise à jour par le réseau, contrat v1.4.
+     *
+     * C'est la seule fonction du plugin qui peut CASSER DURABLEMENT un écran à
+     * distance : une image défectueuse écrite dans la partition inactive, et il
+     * faut décrocher la carte du mur pour la rebrancher en USB. Toute la
+     * conception en découle.
+     *
+     * Deux verrous indépendants, tous deux côté serveur, tous deux fermés par
+     * défaut :
+     *
+     *   ota_enabled  — réglage GLOBAL du plugin (config::byKey) ;
+     *   ota_allowed  — réglage PAR ÉCRAN (configuration de l'eqLogic).
+     *
+     * Les DEUX doivent être ouverts pour qu'un écran reçoive « update: true ».
+     * Ce n'est pas une ceinture et des bretelles : les deux verrous ne servent
+     * pas à la même chose.
+     *
+     *   - Le verrou par écran permet le DÉPLOIEMENT PROGRESSIF. On ouvre un
+     *     seul écran témoin, on vérifie qu'il revient en ligne et qu'il
+     *     fonctionne, puis on ouvre les autres. Sans lui, une mauvaise version
+     *     part partout en même temps, et l'on découvre le défaut sur six murs
+     *     au lieu d'un.
+     *   - Le verrou global permet d'ARRÊTER NET la propagation. Un firmware
+     *     qui s'avère défectueux se coupe d'un seul interrupteur : les écrans
+     *     qui n'ont pas encore mis à jour continuent d'interroger et reçoivent
+     *     « update: false », sans qu'il faille rouvrir chaque équipement.
+     *
+     * Une carte bloquée reçoit exactement la même réponse qu'une carte à jour,
+     * et c'est voulu : elle n'a aucun moyen de faire la différence, donc aucun
+     * moyen de passer outre. La décision est entièrement côté serveur.
+     */
+
+    /*
+     * Le dossier de dépôt du firmware. __DIR__ est core/class/ : le dossier
+     * visé est donc data/firmware/ à la racine DU PLUGIN — jamais ailleurs, et
+     * surtout pas dans le coeur de Jeedom.
+     */
+    public static function firmwareDir($_create = false) {
+        $dir = __DIR__ . '/../../data/' . self::FIRMWARE_DIR;
+        if ($_create && !is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        /* Résolu quand il existe : le chemin brut porte un « core/class/../.. »
+         * qui serait affiché tel quel dans la page, et qui ferait douter de
+         * l'endroit où le binaire a réellement été écrit. */
+        $real = realpath($dir);
+        return ($real !== false) ? $real : $dir;
+    }
+
+    /*
+     * L'URL publique du binaire. C'est elle qui part dans la réponse de
+     * « action=firmware », et c'est la carte — pas un navigateur authentifié —
+     * qui la télécharge : le fichier doit donc être servi en clair par Apache.
+     *
+     * data/.htaccess porte « Deny from all » ; data/firmware/.htaccess rouvre
+     * les seuls fichiers .bin, exactement comme plugin_info/.htaccess rouvre
+     * les seules images. Sans cette exception, la carte reçoit un 403 au
+     * milieu de la mise à jour, et le journal d'Apache une ligne
+     * « client denied by server configuration ».
+     */
+    public static function firmwareUrl($_file) {
+        $root = '';
+        try {
+            $root = network::getNetworkAccess('internal');
+        } catch (Throwable $e) {
+            $root = '';
+        }
+        return $root . '/plugins/glowscreen32/data/' . self::FIRMWARE_DIR . '/' . rawurlencode($_file);
+    }
+
+    /*
+     * Le firmware déposé, ou null s'il n'y en a pas.
+     *
+     * Les métadonnées vivent dans la configuration du plugin, et le binaire
+     * dans data/firmware/ : les deux peuvent diverger — un fichier effacé à la
+     * main, un dossier perdu. « exists » dit lequel des deux manque, et c'est
+     * cette clé, et non la seule présence des métadonnées, qui décide
+     * d'annoncer une mise à jour.
+     */
+    public static function firmware() {
+        $file = trim((string) config::byKey('firmware_file', 'glowscreen32', ''));
+        if ($file === '') {
+            return null;
+        }
+        $path = self::firmwareDir() . '/' . $file;
+        return array(
+            'file'    => $file,
+            'path'    => $path,
+            'exists'  => is_file($path),
+            'version' => trim((string) config::byKey('firmware_version', 'glowscreen32', '')),
+            'sha256'  => trim((string) config::byKey('firmware_sha256', 'glowscreen32', '')),
+            'size'    => (int) config::byKey('firmware_size', 'glowscreen32', 0),
+            'human'   => self::humanSize((int) config::byKey('firmware_size', 'glowscreen32', 0)),
+            'date'    => trim((string) config::byKey('firmware_date', 'glowscreen32', '')),
+            'url'     => self::firmwareUrl($file),
+        );
+    }
+
+    /* Le verrou global. Fermé par défaut, et il le reste tant que personne ne
+     * l'a ouvert sciemment : config::byKey rend '' sur une clé jamais écrite,
+     * ce qui vaut 0. */
+    public static function otaEnabled() {
+        return ((int) config::byKey('ota_enabled', 'glowscreen32', 0)) === 1;
+    }
+
+    /*
+     * Ouvre ou ferme le verrou global, et l'écrit au journal.
+     *
+     * Le journal n'est pas une coquetterie : couper l'interrupteur global est
+     * le geste qu'on fait quand une mise à jour tourne mal, et savoir à quelle
+     * minute il a été coupé est la première chose qu'on cherche ensuite.
+     *
+     * Ne s'appelle PAS « setOtaEnabled » : utils::a2o() appelle « set » + clé
+     * de formulaire sur l'objet à chaque enregistrement, et une méthode de ce
+     * nom finirait par être appelée à contretemps (STRUCTURE-PLUGIN-JEEDOM.md,
+     * § 8).
+     */
+    public static function enableOta($_enabled) {
+        $enabled = ($_enabled) ? 1 : 0;
+        config::save('ota_enabled', $enabled, 'glowscreen32');
+        log::add('glowscreen32', 'info', ($enabled == 1)
+            ? __('OTA : le verrou global du plugin est OUVERT. Les écrans dont le verrou individuel est ouvert recevront la mise à jour.', __FILE__)
+            : __('OTA : le verrou global du plugin est FERMÉ. Plus aucun écran ne recevra de mise à jour, quel que soit son réglage individuel.', __FILE__));
+        return $enabled;
+    }
+
+    /*
+     * Une version telle qu'on accepte de l'écrire : chiffres, lettres, point,
+     * tiret, souligné, plus. Elle finit dans un NOM DE FICHIER et dans une URL
+     * ; tout le reste est retiré ici, une fois, plutôt que d'espérer que
+     * chaque usage y pense.
+     */
+    public static function sanitizeVersion($_version) {
+        $version = preg_replace('/[^0-9A-Za-z._+-]/', '', trim((string) $_version));
+        /* Ni « .. », ni un point en tête : le nom de fichier est construit à
+         * partir de cette chaîne, et rien ne doit pouvoir désigner un dossier
+         * parent. */
+        $version = str_replace('..', '', $version);
+        $version = ltrim($version, '.-');
+        return (strlen($version) > 32) ? substr($version, 0, 32) : $version;
+    }
+
+    /*
+     * La version lue DANS le binaire, ou une chaîne vide.
+     *
+     * esp_app_desc_t est écrit par l'outillage ESP-IDF à l'offset 0x20 de
+     * l'image : son mot magique la reconnaît à coup sûr, et son champ
+     * « version » est celui que la carte elle-même annonce à « action=firmware ».
+     * Les deux viennent donc de la même source, et comparer l'une à l'autre a
+     * un sens — ce qui ne serait pas le cas d'un numéro retapé à la main.
+     */
+    public static function imageVersion($_head) {
+        $head   = (string) $_head;
+        $needed = self::ESP_APP_DESC_OFFSET + self::ESP_APP_VERSION_OFFSET + self::ESP_APP_VERSION_LENGTH;
+        if (strlen($head) < $needed) {
+            return '';
+        }
+        $magic = unpack('V', substr($head, self::ESP_APP_DESC_OFFSET, 4));
+        if (!is_array($magic) || !isset($magic[1]) || $magic[1] != self::ESP_APP_DESC_MAGIC) {
+            return '';
+        }
+        $raw = substr($head, self::ESP_APP_DESC_OFFSET + self::ESP_APP_VERSION_OFFSET, self::ESP_APP_VERSION_LENGTH);
+        $end = strpos($raw, "\0");
+        if ($end !== false) {
+            $raw = substr($raw, 0, $end);
+        }
+        return self::sanitizeVersion($raw);
+    }
+
+    /* Le dernier recours : la version lue dans le nom du fichier déposé,
+     * « glowscreen32-1.4.0.bin ». Un binaire compilé sans numéro de version
+     * reste déposable, plutôt que de renvoyer l'utilisateur à sa chaîne de
+     * compilation. */
+    public static function versionFromName($_name) {
+        if (preg_match('/([0-9]+(?:\.[0-9]+){1,3}[0-9A-Za-z._+-]*)/', (string) $_name, $matches)) {
+            return self::sanitizeVersion($matches[1]);
+        }
+        return '';
+    }
+
+    /* « 1 002 288 octets » lisible d'un coup d'oeil. */
+    public static function humanSize($_size) {
+        $size = (int) $_size;
+        if ($size < 1024) {
+            return $size . ' o';
+        }
+        if ($size < 1048576) {
+            return number_format($size / 1024, 1, ',', ' ') . ' Kio';
+        }
+        return number_format($size / 1048576, 2, ',', ' ') . ' Mio';
+    }
+
+    /*
+     * Dépose un firmware, et en fait CELUI que les écrans se verront proposer.
+     *
+     * Tout est vérifié avant d'écrire quoi que ce soit : ce qui est déposé ici
+     * sera écrit tel quel dans la flash d'une carte accrochée à un mur, et le
+     * seul moment où l'on peut encore refuser est celui-ci.
+     *
+     * Rend les métadonnées du firmware déposé. Lève une exception, avec un
+     * message destiné à l'utilisateur, sur tout ce qui l'empêche.
+     */
+    public static function publishFirmware($_tmpPath, $_name = '', $_version = '') {
+        if (!is_file($_tmpPath)) {
+            throw new Exception(__('Aucun fichier reçu.', __FILE__));
+        }
+        $size = (int) filesize($_tmpPath);
+        if ($size <= 0) {
+            throw new Exception(__('Le fichier reçu est vide.', __FILE__));
+        }
+        if ($size > self::FIRMWARE_MAX_SIZE) {
+            throw new Exception(sprintf(
+                __('Le fichier fait %1$s : ce n\'est pas une image d\'application ESP32, la carte n\'a que 4 Mo de flash pour deux partitions. Maximum accepté : %2$s.', __FILE__),
+                self::humanSize($size), self::humanSize(self::FIRMWARE_MAX_SIZE)));
+        }
+
+        $head = @file_get_contents($_tmpPath, false, null, 0, 256);
+        if ($head === false || $head === '' || ord($head[0]) !== self::ESP_IMAGE_MAGIC) {
+            throw new Exception(__('Ce fichier ne commence pas par l\'octet 0xE9 : ce n\'est pas une image d\'application ESP32. Déposer autre chose ferait écrire n\'importe quoi dans la partition inactive d\'une carte, qui ne redémarrerait plus.', __FILE__));
+        }
+
+        /* La version du binaire fait foi ; la saisie de l'utilisateur ne sert
+         * que si l'image n'en porte pas. Un numéro retapé à la main qui
+         * contredirait le binaire ferait boucler la carte : elle annoncerait
+         * indéfiniment une version que le plugin croirait périmée. */
+        $version = self::imageVersion($head);
+        $source  = __('lue dans le binaire', __FILE__);
+        if ($version === '') {
+            $version = self::sanitizeVersion($_version);
+            $source  = __('saisie à la main', __FILE__);
+        }
+        if ($version === '') {
+            $version = self::versionFromName($_name);
+            $source  = __('lue dans le nom du fichier', __FILE__);
+        }
+        if ($version === '') {
+            throw new Exception(__('Impossible de déterminer la version de ce firmware : l\'image ne porte pas de descripteur ESP-IDF, le nom du fichier n\'en contient pas, et aucune version n\'a été saisie. Sans version, rien ne permet de décider qu\'une carte est en retard.', __FILE__));
+        }
+
+        $dir = self::firmwareDir(true);
+        if (!is_dir($dir)) {
+            throw new Exception(sprintf(__('Le dossier de dépôt %s n\'existe pas et n\'a pas pu être créé.', __FILE__), $dir));
+        }
+        if (!is_writable($dir)) {
+            throw new Exception(sprintf(__('Le dossier de dépôt %s n\'est pas accessible en écriture par le serveur web.', __FILE__), $dir));
+        }
+
+        $file = 'glowscreen32-' . $version . '.bin';
+        $path = $dir . '/' . $file;
+
+        /* move_uploaded_file quand le fichier vient bien d'un téléversement :
+         * c'est la seule forme qui vérifie que le chemin reçu est un fichier
+         * temporaire de PHP et non un chemin choisi par l'appelant. */
+        $moved = is_uploaded_file($_tmpPath)
+            ? @move_uploaded_file($_tmpPath, $path)
+            : @copy($_tmpPath, $path);
+        if (!$moved || !is_file($path)) {
+            throw new Exception(sprintf(__('L\'écriture de %s a échoué.', __FILE__), $path));
+        }
+        /* Lisible par Apache, qui le sert à la carte. */
+        @chmod($path, 0664);
+
+        $sha256 = hash_file('sha256', $path);
+        $size   = (int) filesize($path);
+
+        /* L'ancien binaire est retiré APRÈS que le nouveau est en place : une
+         * panne au milieu laisse au pire deux fichiers, jamais zéro. */
+        $previous = self::firmware();
+
+        config::save('firmware_file', $file, 'glowscreen32');
+        config::save('firmware_version', $version, 'glowscreen32');
+        config::save('firmware_sha256', $sha256, 'glowscreen32');
+        config::save('firmware_size', $size, 'glowscreen32');
+        config::save('firmware_date', date('Y-m-d H:i:s'), 'glowscreen32');
+
+        if ($previous !== null && $previous['file'] !== $file && is_file($previous['path'])) {
+            @unlink($previous['path']);
+        }
+
+        log::add('glowscreen32', 'info', sprintf(
+            __('OTA : firmware %1$s déposé (%2$s, sha256 %3$s, version %4$s). Verrou global : %5$s.', __FILE__),
+            $version, self::humanSize($size), $sha256, $source,
+            self::otaEnabled() ? __('ouvert', __FILE__) : __('fermé — aucun écran ne le recevra', __FILE__)));
+
+        return self::firmware();
+    }
+
+    /* Retire le firmware déposé : le binaire et ses métadonnées. Plus aucun
+     * écran ne se voit alors proposer quoi que ce soit, verrous ouverts ou
+     * non. */
+    public static function removeFirmware() {
+        $firmware = self::firmware();
+        if ($firmware === null) {
+            return false;
+        }
+        if (is_file($firmware['path'])) {
+            @unlink($firmware['path']);
+        }
+        foreach (array('firmware_file', 'firmware_version', 'firmware_sha256',
+                       'firmware_size', 'firmware_date') as $key) {
+            config::save($key, '', 'glowscreen32');
+        }
+        log::add('glowscreen32', 'info', sprintf(
+            __('OTA : le firmware %1$s a été retiré du dépôt.', __FILE__), $firmware['version']));
+        return true;
+    }
+
+    /*
+     * Tout ce que la page du plugin a besoin de savoir sur l'OTA, en un appel.
+     * Rassemblé ici pour que la page, le contrôleur AJAX et le journal disent
+     * la même chose.
+     */
+    public static function otaState() {
+        $dir = self::firmwareDir();
+        return array(
+            'enabled'  => self::otaEnabled(),
+            'firmware' => self::firmware(),
+            'dir'      => $dir,
+            'writable' => is_dir($dir) && is_writable($dir),
+            'screens'  => self::overview(),
+        );
+    }
+
+    /* Le verrou de CET écran. Fermé par défaut, comme le global : un écran
+     * créé aujourd'hui ne doit pas se retrouver dans le lot du prochain
+     * déploiement sans que personne l'ait décidé. */
+    public function otaAllowed() {
+        return ((int) $this->getConfiguration('ota_allowed', 0)) === 1;
+    }
+
+    /* La version que la carte a annoncée la dernière fois. */
+    public function firmwareVersion() {
+        return trim((string) $this->getConfiguration('fw', ''));
+    }
+
+    /*
+     * Retient la version annoncée par la carte.
+     *
+     * N'écrit QUE si elle a changé : la carte l'annonce à chaque interrogation,
+     * et réécrire la même chaîne toutes les trente secondes ferait le même
+     * gâchis que d'horodater chaque ping. Une mise à jour réussie, elle, est
+     * exactement le moment où l'écriture a lieu — et le journal la note.
+     *
+     * save(true) : écriture directe, sans preSave() ni postSave(). Une carte
+     * qui dit sa version ne doit ni recalculer la signature de mise en page, ni
+     * faire bouger le compteur de version, ni recréer les commandes.
+     */
+    public function noteFirmware($_fw) {
+        $fw = self::sanitizeVersion($_fw);
+        if ($fw === '') {
+            return false;
+        }
+        $known = $this->firmwareVersion();
+        if ($fw === $known) {
+            return false;
+        }
+        $this->setConfiguration('fw', $fw);
+        $this->save(true);
+        $this->checkAndUpdateCmd('firmware', $fw);
+        log::add('glowscreen32', 'info', sprintf(
+            ($known === '')
+                ? __('%1$s : la carte exécute le firmware %2$s.', __FILE__)
+                : __('%1$s : la carte est passée du firmware %3$s au firmware %2$s.', __FILE__),
+            $this->getHumanName(), $fw, $known));
+        return true;
+    }
+
+    /*
+     * La décision d'OTA pour CET écran, contrat v1.4.
+     *
+     * Rend le corps de réponse, ou false quand le firmware annoncé a disparu du
+     * dépôt — le contrat réserve « firmware_unavailable » à ce seul cas.
+     *
+     * Chaque décision laisse une ligne de journal qui dit la version annoncée,
+     * la réponse, et LE VERROU QUI A BLOQUÉ le cas échéant. C'est la seule
+     * chose qui permette de répondre à « pourquoi cet écran-là ne se met pas à
+     * jour ? » : la carte, elle, reçoit la même réponse que si elle était à
+     * jour, et ne peut donc rien en dire.
+     *
+     * Les verrous sont examinés AVANT la comparaison de versions, et tous les
+     * deux : un journal qui ne nommerait que le premier verrou fermé ferait
+     * rouvrir l'un des deux, réessayer, et recommencer.
+     */
+    public function otaDecision($_fw) {
+        $who      = $this->getHumanName();
+        $current  = self::sanitizeVersion($_fw);
+        $shown    = ($current !== '') ? $current : '?';
+        $firmware = self::firmware();
+
+        $locked = array();
+        if (!self::otaEnabled()) {
+            $locked[] = __('le verrou global du plugin (ota_enabled)', __FILE__);
+        }
+        if (!$this->otaAllowed()) {
+            $locked[] = __('le verrou de cet écran (ota_allowed)', __FILE__);
+        }
+
+        if (count($locked) > 0) {
+            log::add('glowscreen32', 'info', sprintf(
+                __('%1$s : OTA refusé — la carte annonce %2$s, bloqué par %3$s. Réponse : update=false.', __FILE__),
+                $who, $shown, implode(__(' et par ', __FILE__), $locked)));
+            return array('ok' => true, 'update' => false);
+        }
+
+        if ($firmware === null || $firmware['version'] === '') {
+            log::add('glowscreen32', 'info', sprintf(
+                __('%1$s : OTA autorisé (les deux verrous sont ouverts) mais aucun firmware n\'est déposé ; la carte annonce %2$s. Réponse : update=false.', __FILE__),
+                $who, $shown));
+            return array('ok' => true, 'update' => false);
+        }
+
+        /* version_compare et non une comparaison de chaînes : « 1.10.0 » est
+         * postérieur à « 1.9.0 », et « 1.9.0 » lui est supérieur en ASCII. */
+        if (!version_compare($firmware['version'], $current, '>')) {
+            log::add('glowscreen32', 'debug', sprintf(
+                __('%1$s : OTA autorisé, la carte annonce %2$s et le dépôt contient %3$s — rien de plus récent à proposer. Réponse : update=false.', __FILE__),
+                $who, $shown, $firmware['version']));
+            return array('ok' => true, 'update' => false);
+        }
+
+        if (!$firmware['exists']) {
+            log::add('glowscreen32', 'error', sprintf(
+                __('%1$s : le firmware %2$s est annoncé par la configuration mais le fichier %3$s a disparu du dépôt. Réponse : firmware_unavailable.', __FILE__),
+                $who, $firmware['version'], $firmware['file']));
+            return false;
+        }
+
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : OTA accordé — la carte annonce %2$s, le firmware %3$s lui est proposé (%4$s octets, sha256 %5$s).', __FILE__),
+            $who, $shown, $firmware['version'], $firmware['size'], $firmware['sha256']));
+
+        return array(
+            'ok'      => true,
+            'update'  => true,
+            'version' => $firmware['version'],
+            'url'     => $firmware['url'],
+            'sha256'  => $firmware['sha256'],
+            'size'    => $firmware['size'],
+        );
+    }
+
     /* ==================================================== CYCLE DE VIE eqLogic */
 
     public function preSave() {
@@ -905,6 +1390,19 @@ class glowscreen32 extends eqLogic {
         }
 
         $this->setConfiguration('poll', $this->poll());
+
+        /*
+         * Le verrou OTA de l'écran, ramené à 0 ou 1. Une case à cocher absente
+         * du formulaire — un équipement créé par restauration, ou par le bouton
+         * « Ajouter » qui n'envoie pas tout — vaut FERMÉ : le défaut d'un
+         * verrou est de l'être.
+         *
+         * Il n'entre PAS dans la signature de mise en page : autoriser un écran
+         * à se mettre à jour ne change rien à ce qu'il affiche, et ne doit donc
+         * pas le faire redessiner.
+         */
+        $this->setConfiguration('ota_allowed', $this->otaAllowed() ? 1 : 0);
+
         $buttons = $this->buttons();
         /* Refusé AVANT l'écriture : un interrupteur sans état s'enregistrerait
          * sans rien dire et se découvrirait sur le mur, un appui sur deux. */
@@ -1027,6 +1525,14 @@ class glowscreen32 extends eqLogic {
                 'subType' => 'string',
                 'icon'    => 'fas fa-hand-pointer',
             ),
+            /* La version annoncée par la carte, contrat v1.4. Sur le dashboard
+             * comme dans un scénario, c'est la seule façon de voir qu'un écran
+             * est resté en arrière après un déploiement progressif. */
+            'firmware' => array(
+                'name'    => __('Version du firmware', __FILE__),
+                'subType' => 'string',
+                'icon'    => 'fas fa-microchip',
+            ),
         );
 
         foreach ($definitions as $logicalId => $definition) {
@@ -1079,9 +1585,21 @@ class glowscreen32 extends eqLogic {
      */
     public static function overview() {
         $screens = array();
+        /* Lu une fois pour tout le parc : le verrou global ne dépend pas de
+         * l'écran, et c'est lui qui décide si le verrou individuel a le moindre
+         * effet. */
+        $ota = self::otaEnabled();
         foreach (eqLogic::byType('glowscreen32') as $eqLogic) {
             $contact = $eqLogic->lastContact();
             $screens[] = array(
+                /* Contrat v1.4 : la version que la carte a annoncée, le verrou
+                 * de l'écran, et ce que les DEUX verrous donnent ensemble.
+                 * C'est ce triplet qui permet de piloter un déploiement
+                 * progressif d'un seul coup d'oeil sur le tableau du parc. */
+                'fw'        => $eqLogic->firmwareVersion(),
+                'ota'       => $eqLogic->otaAllowed(),
+                'otaGlobal' => $ota,
+                'otaOpen'   => ($ota && $eqLogic->otaAllowed()),
                 'id'      => $eqLogic->getId(),
                 'name'    => $eqLogic->getName(),
                 'mac'     => self::prettyMac($eqLogic->getConfiguration('mac', '')),

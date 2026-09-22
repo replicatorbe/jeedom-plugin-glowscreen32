@@ -17,11 +17,12 @@
 
 /*
  * Le point d'entrée des écrans ESP32. Il met en oeuvre, à la lettre, le contrat
- * d'API v1.3 (docs/fr_FR/index.md) :
+ * d'API v1.4 (docs/fr_FR/index.md) :
  *
  *   GET ?action=layout&device=246f28123456     → la mise en page
  *   GET ?action=press&device=…&id=0            → jouer le bouton de RANG 0
  *   GET ?action=ping&device=…                  → le compteur de version
+ *   GET ?action=firmware&device=…&fw=1.3.0     → y a-t-il une mise à jour ?
  *
  * Depuis la v1.3, « id » est le RANG du bouton dans la mise en page (0 à 5) et
  * non un identifiant de commande Jeedom : la carte ne désigne plus ce qui doit
@@ -31,7 +32,8 @@
  *   X-GLOWSCREEN32-APIKEY: <clé>               → l'authentification normale
  *
  * Erreurs : bad_apikey 401, unknown_device 404, unknown_button 404,
- * bad_request 400. Le corps est toujours du JSON, succès comme échec.
+ * firmware_unavailable 404, bad_request 400. Le corps est toujours du JSON,
+ * succès comme échec.
  *
  * Il ne doit surtout pas y avoir de .htaccess « Deny from all » dans ce dossier :
  * ce fichier est appelé depuis le réseau par des cartes qui ne sont pas des
@@ -100,15 +102,15 @@ try {
     }
 
     $action = init('action');
-    if (!in_array($action, array('layout', 'press', 'ping'), true)) {
+    if (!in_array($action, array('layout', 'press', 'ping', 'firmware'), true)) {
         glowscreen32ApiError('bad_request', 400,
             ($action == '') ? __('action absente', __FILE__)
                             : __('action inconnue :', __FILE__) . ' ' . $action);
     }
 
     /*
-     * Les trois actions désignent un écran, et l'adresse est exigée avant toute
-     * autre chose. Une MAC malformée est une erreur de paramètre, pas un écran
+     * Les quatre actions désignent un écran, et l'adresse est exigée avant
+     * toute autre chose. Une MAC malformée est une erreur de paramètre, pas un écran
      * inconnu : le contrat distingue les deux, et c'est la seule façon pour le
      * firmware de savoir s'il doit corriger sa requête ou se faire déclarer.
      */
@@ -138,6 +140,21 @@ try {
             'debug');
     }
 
+    /*
+     * La version exécutée par la carte, contrat v1.4.
+     *
+     * Elle est retenue dès qu'elle est présente, quelle que soit l'action : le
+     * contrat ne l'exige que pour « firmware », mais une carte qui l'annonce
+     * ailleurs renseigne le parc pour rien de plus cher — noteFirmware() n'écrit
+     * que si la version a CHANGÉ, et ne fait donc rien la plupart du temps.
+     *
+     * C'est cette valeur qui s'affiche dans la colonne « Firmware » du tableau
+     * du parc, et sans laquelle un déploiement progressif se piloterait à
+     * l'aveugle : « quel écran est déjà passé en 1.4.0 ? » n'a pas d'autre
+     * source que la carte elle-même.
+     */
+    $eqLogic->noteFirmware(init('fw'));
+
     if ($action == 'ping') {
         $eqLogic->noteContact();
         glowscreen32ApiSend(200, array(
@@ -156,6 +173,40 @@ try {
     if ($action == 'layout') {
         $eqLogic->noteContact();
         glowscreen32ApiSend(200, $eqLogic->layout());
+    }
+
+    /* --- firmware --------------------------------------------------------- */
+
+    /*
+     * La mise à jour par le réseau, contrat v1.4.
+     *
+     * « fw » est EXIGÉE : elle sert à décider s'il y a quelque chose de plus
+     * récent à proposer, et une carte qui ne la donne pas ne demande pas une
+     * mise à jour, elle demande qu'on en choisisse une pour elle. Le contrat
+     * classe le paramètre manquant en « bad_request », et c'est la seule
+     * réponse qui dise au firmware que la faute est chez lui.
+     *
+     * Toute la décision est prise par otaDecision(), côté serveur, et journalisée
+     * là-bas : deux verrous fermés par défaut, dont la carte ne sait rien. Une
+     * carte bloquée reçoit exactement la réponse d'une carte à jour.
+     */
+    if ($action == 'firmware') {
+        $fw = init('fw');
+        if (trim((string) $fw) === '') {
+            glowscreen32ApiError('bad_request', 400, __('paramètre fw absent : la carte doit annoncer la version qu\'elle exécute', __FILE__));
+        }
+        $eqLogic->noteContact();
+
+        $decision = $eqLogic->otaDecision($fw);
+        /* false, et non un tableau : le firmware est annoncé par la
+         * configuration mais son fichier a disparu du dépôt. Le contrat réserve
+         * « firmware_unavailable » à ce cas-là, et à lui seul. */
+        if ($decision === false) {
+            glowscreen32ApiError('firmware_unavailable', 404, sprintf(
+                __('%s : le binaire annoncé est introuvable dans data/firmware/', __FILE__),
+                $eqLogic->getHumanName()), 'error');
+        }
+        glowscreen32ApiSend(200, $decision);
     }
 
     /* --- press ------------------------------------------------------------ */

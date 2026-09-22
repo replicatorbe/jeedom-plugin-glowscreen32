@@ -5,3 +5,20 @@
 # Les contrôles par réflexion n'existent que pour le développement : ils n'ont
 # rien à faire dans la racine web.
 tests/
+
+# Le firmware téléversé depuis la page du plugin.
+#
+# deploy-plugin.sh fait un « rsync --delete » : tout ce que le dépôt de
+# développement ne contient pas disparaît de l'installation. Le binaire, lui,
+# n'arrive JAMAIS par le dépôt — il est déposé par l'utilisateur, dans
+# l'installation, et il n'a rien à faire dans git (un mégaoctet de binaire par
+# version). Sans cette ligne, le premier redéploiement venu l'efface, et les
+# écrans se voient proposer une URL qui rend 404 au milieu de leur mise à jour.
+#
+# Un fichier exclu n'est pas supprimé par --delete (il faudrait
+# --delete-excluded pour cela) : l'exclusion suffit donc à le protéger.
+#
+# Le motif ne vise que les binaires, et non le dossier : data/firmware/.htaccess
+# fait partie du plugin, il doit continuer d'être déployé — c'est lui qui rouvre
+# les .bin que le « Deny from all » de data/ interdirait à la carte.
+data/firmware/*.bin

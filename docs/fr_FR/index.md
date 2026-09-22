@@ -124,8 +124,12 @@ changé d'apparence.
 
 ## Le contrat d'API
 
-Le plugin implémente le contrat v1.3 partagé avec le firmware. Trois actions,
+Le plugin implémente le contrat v1.4 partagé avec le firmware. Quatre actions,
 toutes en GET, toutes authentifiées.
+
+> **Ajouté en v1.4 :** `action=firmware`, la mise à jour par le réseau, et le
+> double verrou qui décide quel écran la reçoit — voir « Mise à jour du
+> firmware par le réseau », plus bas.
 
 > **Changement de v1.3 :** `id` n'est plus l'identifiant d'une commande Jeedom,
 > c'est le **rang du bouton** dans la mise en page (0 à 5). La carte le traite
@@ -214,11 +218,145 @@ ils ne peuvent pas se décaler.
 | `bad_apikey` | 401 | clé absente ou invalide |
 | `unknown_device` | 404 | aucun écran pour cette MAC, ou écran désactivé |
 | `unknown_button` | 404 | identifiant de bouton inconnu pour cet écran |
+| `firmware_unavailable` | 404 | une mise à jour est annoncée mais le binaire a disparu du dépôt |
 | `bad_request` | 400 | paramètre manquant, MAC malformée, ou action inconnue |
 
 Un écran **désactivé** répond `unknown_device` : désactiver un équipement dans
 Jeedom doit couper ce qu'il commande, pas le laisser déclencher des actions
 depuis un mur.
+
+### `action=firmware` — y a-t-il une mise à jour ?
+
+```
+GET ...core/php/api.php?action=firmware&device=246f28123456&fw=1.3.0
+X-GLOWSCREEN32-APIKEY: <clé>
+```
+
+`fw` est la version **que la carte exécute**. Elle est obligatoire, et elle sert
+à deux choses : décider s'il y a plus récent à proposer, et renseigner la
+colonne « Firmware » du tableau du parc.
+
+Rien à faire — ou OTA bloqué :
+
+```json
+{ "ok": true, "update": false }
+```
+
+Mise à jour disponible :
+
+```json
+{
+  "ok": true,
+  "update": true,
+  "version": "1.4.0",
+  "url": "http://192.168.1.10/plugins/glowscreen32/data/firmware/glowscreen32-1.4.0.bin",
+  "sha256": "0fbb3369…",
+  "size": 1002288
+}
+```
+
+La carte télécharge l'URL, vérifie **l'empreinte SHA-256 avant de basculer**,
+écrit dans la partition inactive et redémarre dessus.
+
+La version annoncée est retenue à **n'importe quel** appel qui porte `fw`, y
+compris un `ping` : le plugin ne l'écrit que lorsqu'elle a changé, si bien que
+renseigner le parc ne coûte rien de plus qu'une comparaison de chaînes.
+
+## Mise à jour du firmware par le réseau (OTA)
+
+C'est la seule fonction où Jeedom peut **casser durablement** un écran à
+distance : une image défectueuse écrite dans la partition inactive, et il faut
+décrocher la carte du mur pour la rebrancher en USB. Tout ce qui suit en
+découle.
+
+### Le double verrou
+
+| Verrou | Où | Défaut |
+|---|---|---|
+| `ota_enabled` | **global au plugin** — page du plugin, cadre « Firmware » | **fermé** |
+| `ota_allowed` | **par écran** — onglet « Écran » de l'équipement | **fermé** |
+
+**Les deux** doivent être ouverts pour qu'un écran reçoive `update: true`. Ce
+n'est pas une ceinture et des bretelles : les deux verrous ne font pas le même
+travail.
+
+- Le verrou **par écran** permet le **déploiement progressif**. On ouvre un seul
+  écran témoin, on vérifie qu'il revient en ligne et qu'il fonctionne, puis on
+  ouvre les autres. Sans lui, une mauvaise version part partout en même temps,
+  et l'on découvre le défaut sur six murs au lieu d'un.
+- Le verrou **global** permet d'**arrêter net** la propagation. Un firmware qui
+  s'avère défectueux se coupe d'un seul interrupteur : les écrans qui n'ont pas
+  encore mis à jour continuent d'interroger et reçoivent `update: false`, sans
+  qu'il faille rouvrir chaque équipement un par un.
+
+Une carte bloquée reçoit **exactement la même réponse** qu'une carte à jour, et
+c'est voulu : elle n'a aucun moyen de faire la différence, donc aucun moyen de
+passer outre. La décision est entièrement côté serveur.
+
+### Déposer un firmware
+
+1. **Page du plugin → cadre « Firmware (mise à jour par le réseau) »**, bouton
+   **Parcourir**, puis **Déposer**. Le fichier attendu est le `.bin` produit par
+   PlatformIO (`.pio/build/cyd/firmware.bin`).
+2. Le plugin **refuse** un fichier qui ne commence pas par l'octet `0xE9` : ce
+   n'est alors pas une image d'application ESP32, et la déposer reviendrait à
+   promettre à une carte quelque chose qui l'empêcherait de redémarrer.
+3. La **version est lue dans le binaire**, dans le descripteur `esp_app_desc_t`
+   que l'outillage ESP-IDF y écrit. C'est la même que celle que la carte annonce
+   à `action=firmware` : comparer les deux a donc un sens, ce qui ne serait pas
+   le cas d'un numéro retapé à la main. À défaut de descripteur, le plugin lit
+   la version dans le nom du fichier.
+4. Le **SHA-256 et la taille** sont calculés ici, sur le fichier réellement
+   écrit, et jamais repris d'une saisie.
+5. Le binaire est rangé dans `data/firmware/` du plugin, sous le nom
+   `glowscreen32-<version>.bin`. Déposer une nouvelle version **remplace** la
+   précédente : il n'y a jamais qu'un firmware proposé à la fois.
+
+Déposer ne déverrouille rien. C'est la marche à suivre : on dépose, puis on
+ouvre le verrou global, puis un seul écran témoin.
+
+### Ce que le déploiement du plugin ne touche pas
+
+`deploy-plugin.sh` fait un `rsync --delete` : tout ce que le dépôt de
+développement ne contient pas disparaît de l'installation. Le binaire, lui,
+n'arrive jamais par le dépôt — il est déposé par l'utilisateur, dans
+l'installation. `.deployignore` exclut donc `data/firmware/*.bin`, et un fichier
+exclu n'est pas supprimé par `--delete`. **Un redéploiement n'efface pas le
+firmware déposé** ; c'est vérifié par `tests/check-classes.php`, qui refuse un
+`.deployignore` sans cette ligne.
+
+L'exclusion ne vise que les binaires, et non le dossier : `data/firmware/.htaccess`
+fait partie du plugin et doit continuer d'être déployé.
+
+### Pourquoi un `.htaccess` de plus
+
+`data/.htaccess` porte `Deny from all`. Le firmware, lui, est téléchargé par une
+**carte**, pas par un navigateur authentifié : `data/firmware/.htaccess` rouvre
+donc les seuls fichiers `.bin`, exactement comme `plugin_info/.htaccess` rouvre
+les seules images. Sans cette exception, la carte reçoit un 403 au milieu de sa
+mise à jour, et `log/http.error` une ligne « client denied by server
+configuration » — la panne qu'a déjà eue l'icône du plugin, au même endroit et
+pour la même raison.
+
+### Piloter un déploiement
+
+Le tableau du parc, sur la page du plugin, donne pour chaque écran : le nom, la
+MAC, le dernier contact, **la version du firmware que la carte annonce**, et
+**l'état des deux verrous**. C'est avec ces deux dernières colonnes qu'on suit
+un déploiement progressif : on ouvre un écran, on attend qu'il repasse en ligne
+avec sa nouvelle version, puis on ouvre le suivant.
+
+Si quelque chose tourne mal : **fermer le verrou global**. Les écrans restés en
+arrière reçoivent `update: false` dès leur appel suivant.
+
+### Le retour arrière, côté carte
+
+Le plugin ne peut pas rattraper une image qui ne démarre pas : c'est au firmware
+de le faire. La carte ne doit se déclarer saine
+(`esp_ota_mark_app_valid_cancel_rollback()`) qu'**après** avoir vérifié qu'elle
+a le Wi-Fi, que l'API répond et que l'écran s'est initialisé. Sinon l'ESP32
+rebascule seul sur la partition précédente. Ne jamais marquer le firmware valide
+dès `setup()` : ce serait désactiver le filet tout en croyant l'avoir.
 
 ### Les scénarios
 
@@ -231,7 +369,7 @@ plus de raison d'être et a disparu.
 
 ## Les commandes de l'équipement
 
-Trois informations, écrites au fil des échanges avec la carte. Aucune n'est
+Quatre informations, écrites au fil des échanges avec la carte. Aucune n'est
 nécessaire au dialogue : elles existent pour que l'écran soit un équipement
 ordinaire sur le dashboard, et qu'un scénario puisse réagir à un appui.
 
@@ -240,6 +378,7 @@ ordinaire sur le dashboard, et qu'un scénario puisse réagir à un appui.
 | Version de la mise en page | le compteur que la carte surveille |
 | Dernier contact | horodaté à chaque appel reçu, `layout` comme `ping` |
 | Dernier bouton | le libellé du dernier bouton appuyé |
+| Version du firmware | la version que la carte annonce, écrite seulement quand elle change |
 
 **Dernier contact** est la façon de savoir si un écran est en ligne. Il est
 écrit à deux endroits : la commande d'information ci-dessus, et la
@@ -262,6 +401,18 @@ ligne** au-delà de trois intervalles de rafraîchissement sans nouvelle.
 `log::add('glowscreen32', …)`, visible dans **Analyse → Journaux →
 glowscreen32**. Les appuis y sont en `info`, les clés refusées en `warning`, les
 cartes non déclarées en `debug`.
+
+**Chaque décision d'OTA y laisse une ligne** : la version que la carte annonce,
+la réponse donnée, et — quand elle est négative — **le ou les verrous qui ont
+bloqué**, nommés l'un et l'autre. C'est la seule chose qui réponde à « pourquoi
+cet écran-là ne se met pas à jour ? » : la carte, elle, reçoit la même réponse
+que si elle était à jour, et ne peut donc rien en dire. Les changements du
+verrou global et les dépôts de firmware y figurent aussi.
+
+Ces lignes sont en `info` : si le niveau de journalisation du plugin est réglé
+sur « Error », elles n'apparaissent pas. **Analyse → Journaux → configuration**,
+ou l'engrenage du plugin, permet de le régler sur « Info » le temps d'un
+déploiement.
 
 En cas d'enregistrement qui « ne fait rien », c'est `log/http.error` qu'il faut
 regarder en premier : une erreur fatale de PHP n'atteint jamais le journal du

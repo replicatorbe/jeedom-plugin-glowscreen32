@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2
+
+Over-the-air firmware updates (API contract v1.4).
+
+- **`action=firmware`**: the board reports the version it runs, the plugin
+  answers `update: false` or the full object with `version`, `url`, `sha256` and
+  `size`. The board checks the digest before switching partitions.
+- **Two independent locks, both closed by default**: `ota_enabled` plugin-wide
+  and `ota_allowed` per screen. Both must be open for an update to go out. The
+  per-screen lock makes staged rollouts possible; the global one stops a bad
+  firmware dead. A blocked board gets exactly the answer an up-to-date board
+  gets.
+- **Firmware upload from the plugin page.** A file not starting with byte
+  `0xE9` is refused. The version is read from the ESP-IDF application descriptor
+  inside the image; SHA-256 and size are computed on the written file.
+- The binary lives in `data/firmware/` and is **excluded from deployment**:
+  redeploying the plugin does not wipe it. `data/firmware/.htaccess` reopens
+  `.bin` files so the board can download them.
+- **Fleet tracking**: each screen's reported firmware version is stored (written
+  only when it changes), exposed as a "Firmware version" information command,
+  and shown in the fleet table next to both locks' state.
+- **Every OTA decision is logged**, naming the version asked for, the answer,
+  and which lock blocked it.
+
 ## 1.1
 
 Two fixes from a test on real hardware.

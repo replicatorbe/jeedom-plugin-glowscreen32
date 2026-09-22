@@ -421,6 +421,15 @@ function printEqLogic(_eqLogic) {
       : '-'
   }
 
+  /* La version annoncée par la CARTE, contrat v1.4. Elle ne vient pas du
+     formulaire : tant qu'aucune carte n'a appelé, il n'y a rien à montrer, et
+     montrer « 0.0.0 » serait pire que de dire « inconnu ». */
+  var firmware = document.getElementById('span_glowscreen32Firmware')
+  if (firmware !== null) {
+    var fw = String(init(configuration.fw, '')).trim()
+    firmware.textContent = (saved && fw !== '') ? fw : '{{inconnu}}'
+  }
+
   glowscreen32RenderButtons(_eqLogic)
   glowscreen32ShowApi(init(configuration.mac, ''))
 }
@@ -532,6 +541,134 @@ function addCmdToTable(_cmd) {
   jeedom.cmd.changeType(newRow, init(_cmd.subType))
 }
 
+/* ==================================================================== OTA */
+
+/* Le firmware déposé et les verrous viennent du serveur ; tout ce qui est écrit
+   dans la page à partir de là est échappé, sans exception. Un nom de fichier et
+   un numéro de version sont bornés côté serveur, mais les recoller dans du HTML
+   sans les échapper serait une faute qui ne se voit qu'une fois exploitée. */
+function glowscreen32Escape(_text) {
+  var holder = document.createElement('div')
+  holder.textContent = (_text === null || typeof _text === 'undefined') ? '' : String(_text)
+  return holder.innerHTML
+}
+
+/* Le cadre « Firmware déposé », reconstruit après un dépôt ou un retrait. Le
+   serveur rend le même tableau à l'ouverture de la page : les deux disent la
+   même chose, à partir de la même structure. */
+function glowscreen32RenderFirmware(_state) {
+  var box = document.getElementById('div_glowscreen32Firmware')
+  var firmware = (_state && _state.firmware) ? _state.firmware : null
+
+  if (box !== null) {
+    if (firmware === null) {
+      box.innerHTML = '<span class="form-control-static">{{Aucun firmware déposé.}}</span>'
+    } else {
+      var rows = ''
+      rows += '<tr><td style="width:120px;">{{Version}}</td><td><b>' + glowscreen32Escape(firmware.version) + '</b>'
+      rows += firmware.exists ? '' : ' <span class="label label-danger">{{fichier introuvable}}</span>'
+      rows += '</td></tr>'
+      rows += '<tr><td>{{Fichier}}</td><td><code>' + glowscreen32Escape(firmware.file) + '</code> — '
+        + glowscreen32Escape(firmware.human) + ' (' + glowscreen32Escape(firmware.size) + ' {{octets}})</td></tr>'
+      rows += '<tr><td>{{SHA-256}}</td><td><code style="word-break:break-all;font-size:11px;">'
+        + glowscreen32Escape(firmware.sha256) + '</code></td></tr>'
+      rows += '<tr><td>{{URL}}</td><td><code style="word-break:break-all;font-size:11px;">'
+        + glowscreen32Escape(firmware.url) + '</code></td></tr>'
+      rows += '<tr><td>{{Déposé le}}</td><td>' + glowscreen32Escape(firmware.date) + '</td></tr>'
+      box.innerHTML = '<table class="table table-condensed" style="margin:0;max-width:760px;">' + rows + '</table>'
+    }
+  }
+
+  var remove = document.getElementById('bt_glowscreen32FirmwareRemove')
+  if (remove !== null) { remove.style.display = (firmware === null) ? 'none' : '' }
+}
+
+/* L'état des verrous, partout où il se lit : l'interrupteur global, son
+   étiquette, et la colonne « Verrou OTA » du tableau du parc.
+
+   La colonne est recalculée, et non recopiée : ce qu'elle montre est le ET des
+   DEUX verrous, c'est-à-dire ce que la carte recevra — pas ce qui est coché
+   quelque part. Fermer l'interrupteur global doit faire basculer d'un coup
+   toutes les lignes du tableau, sinon on croirait avoir arrêté la propagation
+   alors qu'on regarde un affichage périmé. */
+function glowscreen32RenderOta(_state) {
+  if (!_state) { return }
+
+  var checkbox = document.getElementById('cb_glowscreen32Ota')
+  if (checkbox !== null) { checkbox.checked = (_state.enabled === true) }
+
+  var badge = document.getElementById('span_glowscreen32OtaState')
+  if (badge !== null) {
+    badge.textContent = _state.enabled ? '{{ouvert}}' : '{{fermé}}'
+    badge.className = 'label ' + (_state.enabled ? 'label-success' : 'label-default')
+  }
+
+  var body = document.getElementById('tbody_glowscreen32Fleet')
+  if (body !== null) {
+    var rows = body.querySelectorAll('tr')
+    for (var index = 0; index < rows.length; index++) {
+      var cell = rows[index].querySelector('.glowscreen32OtaCell')
+      if (cell === null) { continue }
+      var allowed = rows[index].getAttribute('data-gs-ota-allowed') === '1'
+      if (!allowed) {
+        cell.innerHTML = '<span class="label label-default">{{fermé (écran)}}</span>'
+      } else if (!_state.enabled) {
+        cell.innerHTML = '<span class="label label-default">{{fermé (global)}}</span>'
+      } else {
+        cell.innerHTML = '<span class="label label-success">{{ouvert}}</span>'
+      }
+    }
+  }
+
+  glowscreen32RenderFirmware(_state)
+}
+
+/* Le dépôt d'un firmware passe par FormData et fetch, et non par
+   glowscreen32Ajax() : un fichier ne se transporte pas dans un corps encodé en
+   formulaire classique. Le reste — la forme { state, result } de la réponse,
+   les alertes — est identique au reste de la page. */
+function glowscreen32UploadFirmware(_button) {
+  var input = document.getElementById('in_glowscreen32FirmwareFile')
+  if (input === null || input.files.length === 0) {
+    jeedomUtils.showAlert({ message: '{{Choisissez d\'abord le fichier .bin à déposer.}}', level: 'warning' })
+    return
+  }
+
+  var release = function () {
+    _button.removeAttribute('disabled')
+    _button.classList.remove('disabled')
+  }
+  _button.setAttribute('disabled', 'disabled')
+  _button.classList.add('disabled')
+
+  var payload = new FormData()
+  payload.append('action', 'firmwareupload')
+  payload.append('firmware', input.files[0])
+
+  fetch('plugins/glowscreen32/core/ajax/glowscreen32.ajax.php', {
+    method: 'POST',
+    body: payload,
+    credentials: 'same-origin'
+  }).then(function (response) {
+    return response.json()
+  }).then(function (data) {
+    release()
+    if (data.state != 'ok') {
+      jeedomUtils.showAlert({ message: data.result, level: 'danger' })
+      return
+    }
+    input.value = ''
+    glowscreen32RenderOta(data.result)
+    jeedomUtils.showAlert({
+      message: '{{Firmware déposé. Il ne part nulle part tant que les deux verrous ne sont pas ouverts.}}',
+      level: 'success'
+    })
+  }).catch(function () {
+    release()
+    jeedomUtils.showAlert({ message: '{{Le dépôt du firmware a échoué.}}', level: 'danger' })
+  })
+}
+
 /* ================================================================ ÉCOUTES */
 
 /* Les pages sont chargées en AJAX : DOMContentLoaded a déjà eu lieu quand ce
@@ -556,6 +693,24 @@ glowscreen32Container.addEventListener('input', function (event) {
 })
 
 glowscreen32Container.addEventListener('change', function (event) {
+  /* Le verrou global prend effet TOUT DE SUITE, sans passer par un bouton
+     « Sauvegarder » : c'est un arrêt d'urgence, et un arrêt d'urgence qui
+     demande une confirmation n'en est pas un. La case est remise à ce que le
+     serveur répond, jamais à ce que l'on vient de cocher. */
+  if (event.target.closest('#cb_glowscreen32Ota')) {
+    var wanted = event.target.checked ? 1 : 0
+    glowscreen32Ajax('otaglobal', { enabled: wanted }, function (result) {
+      glowscreen32RenderOta(result)
+      jeedomUtils.showAlert({
+        message: result.enabled
+          ? '{{Verrou global ouvert. Seuls les écrans dont le verrou individuel est ouvert recevront la mise à jour.}}'
+          : '{{Verrou global fermé. Plus aucun écran ne recevra de mise à jour.}}',
+        level: result.enabled ? 'warning' : 'success'
+      })
+    })
+    return
+  }
+
   var block = event.target.closest('.glowscreen32Button')
   if (block === null) { return }
 
@@ -572,6 +727,28 @@ glowscreen32Container.addEventListener('change', function (event) {
 
 glowscreen32Container.addEventListener('click', function (event) {
   var target = null
+
+  if (target = event.target.closest('#bt_glowscreen32FirmwareUpload')) {
+    if (target.classList.contains('disabled')) { return }
+    glowscreen32UploadFirmware(target)
+    return
+  }
+
+  if (target = event.target.closest('#bt_glowscreen32FirmwareRemove')) {
+    if (target.classList.contains('disabled')) { return }
+    var button = target
+    /* Une confirmation, ici : retirer le firmware n'est pas destructeur pour
+       les écrans — ils gardent le leur — mais le binaire, lui, est effacé, et
+       il faut alors le retrouver dans la chaîne de compilation. */
+    jeeDialog.confirm('{{Retirer le firmware déposé ? Le binaire sera effacé du serveur ; les écrans déjà mis à jour ne sont pas touchés.}}', function (confirmed) {
+      if (!confirmed) { return }
+      glowscreen32Ajax('firmwareremove', {}, function (result) {
+        glowscreen32RenderOta(result)
+        jeedomUtils.showAlert({ message: '{{Firmware retiré.}}', level: 'success' })
+      }, button)
+    })
+    return
+  }
 
   if (target = event.target.closest('.glowscreen32Pick')) {
     var block = target.closest('.glowscreen32Button')

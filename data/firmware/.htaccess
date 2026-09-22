@@ -1,0 +1,14 @@
+Order allow,deny
+# Le firmware est téléchargé par une CARTE, pas par un navigateur authentifié :
+# le binaire doit donc être servi en clair par Apache. Le .htaccess du dossier
+# parent (data/) porte « Deny from all » ; celui-ci rouvre les seuls fichiers
+# .bin, exactement comme plugin_info/.htaccess rouvre les seules images.
+#
+# Sans cette exception, la carte reçoit un 403 au milieu de sa mise à jour et le
+# journal d'Apache une ligne « AH01797 client denied by server configuration ».
+# C'est la panne qu'a déjà eue l'icône du plugin, au même endroit et pour la
+# même raison.
+<Files ~ "\.bin$">
+   allow from all
+</Files>
+Deny from all

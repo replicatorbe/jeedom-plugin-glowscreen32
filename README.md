@@ -8,8 +8,14 @@ physique, reconnu à l'adresse MAC de sa carte, portant jusqu'à six boutons.
   identique sur toutes les cartes.
 - **Six boutons par écran** : libellé, couleur, icône, et ce que l'appui
   déclenche — une commande d'action de Jeedom, ou un scénario.
-- **Un point d'entrée HTTP** conforme au contrat d'API v1.1 partagé avec le
-  firmware : `layout`, `press`, `ping`, clé en en-tête `X-GLOWSCREEN32-APIKEY`.
+- **Un point d'entrée HTTP** conforme au contrat d'API v1.4 partagé avec le
+  firmware : `layout`, `press`, `ping`, `firmware`, clé en en-tête
+  `X-GLOWSCREEN32-APIKEY`.
+- **Mise à jour du firmware par le réseau**, sous **double verrou fermé par
+  défaut** : un verrou global au plugin, un verrou par écran, et les deux
+  doivent être ouverts. C'est ce qui permet d'ouvrir un seul écran témoin avant
+  les autres, et d'arrêter net la propagation d'une version défectueuse. Une
+  carte bloquée reçoit exactement la réponse d'une carte à jour.
 - **Enrôlement sans câble** : une carte non déclarée affiche sa propre MAC, il
   suffit de la recopier dans un nouvel équipement.
 - **Un aperçu de la grille 3×2** dans la page de configuration, et le moyen de

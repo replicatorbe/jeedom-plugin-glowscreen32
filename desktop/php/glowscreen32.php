@@ -18,6 +18,11 @@ foreach (scenario::all() as $gsScenario) {
 }
 sendVarToJS('glowscreen32Scenarios', $gsScenarios);
 sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
+
+/* L'état de l'OTA : le verrou global, le firmware déposé, le parc. Une seule
+   lecture, réutilisée par le tableau du parc et par le cadre « Firmware ». */
+$gsOta = glowscreen32::otaState();
+$gsFirmware = $gsOta['firmware'];
 ?>
 
 <style>
@@ -159,18 +164,18 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 						<tr>
 							<th>{{Écran}}</th>
 							<th style="width:170px;">{{Adresse MAC}}</th>
-							<th style="width:90px;">{{Boutons}}</th>
-							<th style="width:90px;">{{Version}}</th>
 							<th style="width:230px;">{{Dernier contact}}</th>
+							<th style="width:120px;">{{Firmware}}</th>
+							<th style="width:150px;">{{Verrou OTA}}</th>
+							<th style="width:80px;">{{Boutons}}</th>
+							<th style="width:80px;">{{Version}}</th>
 						</tr>
 					</thead>
-					<tbody>
-						<?php foreach (glowscreen32::overview() as $gsScreen) { ?>
-							<tr>
+					<tbody id="tbody_glowscreen32Fleet">
+						<?php foreach ($gsOta['screens'] as $gsScreen) { ?>
+							<tr data-gs-ota-allowed="<?php echo $gsScreen['ota'] ? 1 : 0; ?>">
 								<td><?php echo $gsScreen['name']; ?><?php echo ($gsScreen['enable'] == 1) ? '' : ' <span class="label label-default">{{désactivé}}</span>'; ?></td>
 								<td><code><?php echo ($gsScreen['mac'] != '') ? $gsScreen['mac'] : '—'; ?></code></td>
-								<td><?php echo $gsScreen['buttons']; ?></td>
-								<td><?php echo $gsScreen['version']; ?></td>
 								<td>
 									<?php if ($gsScreen['human'] == '') { ?>
 										<span class="label label-default">{{jamais vu}}</span>
@@ -181,13 +186,95 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 										<?php } ?>
 									<?php } ?>
 								</td>
+								<td>
+									<?php if ($gsScreen['fw'] == '') { ?>
+										<span class="label label-default">{{inconnu}}</span>
+									<?php } else { ?>
+										<code><?php echo $gsScreen['fw']; ?></code>
+										<?php if ($gsFirmware !== null && $gsFirmware['version'] != '' && version_compare($gsFirmware['version'], $gsScreen['fw'], '>')) { ?>
+											<span class="label label-info">{{en retard}}</span>
+										<?php } ?>
+									<?php } ?>
+								</td>
+								<!-- Les deux verrous, et leur ET logique : c'est ce que la carte
+								     recevra, et non ce qui est coché quelque part. -->
+								<td class="glowscreen32OtaCell">
+									<?php if ($gsScreen['otaOpen']) { ?>
+										<span class="label label-success">{{ouvert}}</span>
+									<?php } elseif (!$gsScreen['ota']) { ?>
+										<span class="label label-default">{{fermé (écran)}}</span>
+									<?php } else { ?>
+										<span class="label label-default">{{fermé (global)}}</span>
+									<?php } ?>
+								</td>
+								<td><?php echo $gsScreen['buttons']; ?></td>
+								<td><?php echo $gsScreen['version']; ?></td>
 							</tr>
 						<?php } ?>
 					</tbody>
 				</table>
 			</div>
-			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping ». Il est arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle.}}</span>
+			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping ». Il est arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle. La colonne « Firmware » est la version que la carte elle-même annonce ; « Verrou OTA » est le résultat des DEUX verrous, celui du plugin et celui de l'écran — c'est avec ces deux colonnes qu'on pilote un déploiement progressif.}}</span>
 		<?php } ?>
+
+		<!-- ========================= FIRMWARE / OTA ========================= -->
+		<legend><i class="fas fa-microchip"></i> {{Firmware (mise à jour par le réseau)}}</legend>
+		<div style="margin:5px;">
+			<div class="alert alert-warning">
+				<b>{{Deux verrous, tous deux fermés par défaut.}}</b>
+				{{L'OTA est la seule fonction où Jeedom peut casser durablement un écran à distance : il faudrait décrocher la carte du mur pour la rebrancher en USB. Il faut donc que le verrou global ci-dessous ET le verrou de l'écran concerné (onglet « Écran » de l'équipement) soient ouverts pour qu'une carte reçoive une mise à jour. Une carte bloquée reçoit exactement la même réponse qu'une carte à jour : elle n'a aucun moyen de faire la différence, donc aucun moyen de passer outre.}}
+				<br><br>
+				<b>{{La marche à suivre :}}</b>
+				{{déposer le binaire, ouvrir le verrou global, puis ouvrir UN SEUL écran témoin. Vérifier qu'il revient en ligne, que sa version a changé dans le tableau ci-dessus, et qu'il fonctionne. Ouvrir ensuite les autres. Si quelque chose tourne mal, fermer le verrou global arrête net la propagation : les écrans qui n'ont pas encore mis à jour continuent d'interroger et reçoivent « pas de mise à jour ».}}
+			</div>
+
+			<form class="form-horizontal">
+				<div class="form-group">
+					<label class="col-sm-3 control-label">{{Verrou global}}</label>
+					<div class="col-sm-9">
+						<label class="checkbox-inline">
+							<input type="checkbox" id="cb_glowscreen32Ota"<?php echo $gsOta['enabled'] ? ' checked' : ''; ?>>
+							{{Autoriser les mises à jour par le réseau}}
+						</label>
+						<span id="span_glowscreen32OtaState" class="label <?php echo $gsOta['enabled'] ? 'label-success' : 'label-default'; ?>" style="margin-left:10px;"><?php echo $gsOta['enabled'] ? '{{ouvert}}' : '{{fermé}}'; ?></span>
+						<span class="help-block" style="margin:0;">{{Prend effet immédiatement, sans enregistrement : c'est un interrupteur d'arrêt d'urgence, il ne doit pas dépendre d'un bouton « Sauvegarder ». Chaque changement est écrit dans le journal du plugin.}}</span>
+					</div>
+				</div>
+
+				<div class="form-group">
+					<label class="col-sm-3 control-label">{{Firmware déposé}}</label>
+					<div class="col-sm-9">
+						<div id="div_glowscreen32Firmware">
+							<?php if ($gsFirmware === null) { ?>
+								<span class="form-control-static">{{Aucun firmware déposé.}}</span>
+							<?php } else { ?>
+								<table class="table table-condensed" style="margin:0;max-width:760px;">
+									<tr><td style="width:120px;">{{Version}}</td><td><b><?php echo $gsFirmware['version']; ?></b><?php echo $gsFirmware['exists'] ? '' : ' <span class="label label-danger">{{fichier introuvable}}</span>'; ?></td></tr>
+									<tr><td>{{Fichier}}</td><td><code><?php echo $gsFirmware['file']; ?></code> — <?php echo glowscreen32::humanSize($gsFirmware['size']); ?> (<?php echo $gsFirmware['size']; ?> {{octets}})</td></tr>
+									<tr><td>{{SHA-256}}</td><td><code style="word-break:break-all;font-size:11px;"><?php echo $gsFirmware['sha256']; ?></code></td></tr>
+									<tr><td>{{URL}}</td><td><code style="word-break:break-all;font-size:11px;"><?php echo $gsFirmware['url']; ?></code></td></tr>
+									<tr><td>{{Déposé le}}</td><td><?php echo $gsFirmware['date']; ?></td></tr>
+								</table>
+							<?php } ?>
+						</div>
+						<span class="help-block" style="margin:5px 0 0 0;">{{La carte télécharge cette URL et vérifie l'empreinte SHA-256 AVANT de basculer sur la nouvelle partition. L'empreinte est calculée ici, sur le fichier réellement écrit, et jamais reprise d'une saisie.}}</span>
+					</div>
+				</div>
+
+				<div class="form-group">
+					<label class="col-sm-3 control-label">{{Déposer un firmware}}</label>
+					<div class="col-sm-9">
+						<input type="file" id="in_glowscreen32FirmwareFile" accept=".bin,application/octet-stream">
+						<div style="margin-top:8px;">
+							<a class="btn btn-sm btn-success" id="bt_glowscreen32FirmwareUpload"><i class="fas fa-upload"></i> {{Déposer}}</a>
+							<a class="btn btn-sm btn-danger" id="bt_glowscreen32FirmwareRemove" style="<?php echo ($gsFirmware === null) ? 'display:none;' : ''; ?>"><i class="fas fa-trash"></i> {{Retirer}}</a>
+						</div>
+						<span class="help-block" style="margin:5px 0 0 0;">{{Le fichier <code>.bin</code> produit par PlatformIO (<code>.pio/build/cyd/firmware.bin</code>). La version est lue DANS le binaire, dans le descripteur que l'outillage ESP-IDF y écrit : c'est la même que celle que la carte annonce, ce qui est la seule façon de comparer les deux. Un fichier qui ne commence pas par l'octet 0xE9 est refusé — ce n'est pas une image d'application ESP32.}}</span>
+						<span class="help-block" style="margin:5px 0 0 0;">{{Le binaire est rangé dans <code><?php echo $gsOta['dir']; ?></code><?php echo $gsOta['writable'] ? '' : ' — <b>ce dossier n\'est pas accessible en écriture par le serveur web</b>'; ?>. Il est exclu du déploiement du plugin : un redéploiement ne l'efface pas.}}</span>
+					</div>
+				</div>
+			</form>
+		</div>
 	</div>
 
 	<div class="col-xs-12 eqLogic" style="display: none;">
@@ -282,6 +369,26 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 								</div>
 								<div class="col-sm-7">
 									<span class="help-block" style="margin:0;">{{Secondes entre deux vérifications de la carte. C'est un conseil donné à la carte, pas une contrainte : elle reste libre de son rythme. Chaque vérification est une requête PHP sur la box, 30 secondes est un bon compromis.}}</span>
+								</div>
+							</div>
+						</fieldset>
+
+						<fieldset>
+							<legend><i class="fas fa-download"></i> {{Mise à jour par le réseau}}</legend>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Verrou de cet écran}}</label>
+								<div class="col-sm-2">
+									<input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="ota_allowed">
+								</div>
+								<div class="col-sm-7">
+									<span class="help-block" style="margin:0;">{{Fermé par défaut. Cet écran ne recevra de mise à jour que si ce verrou ET le verrou global du plugin sont ouverts — c'est ce qui permet de n'ouvrir qu'un seul écran témoin, de vérifier qu'il revient en ligne, puis d'ouvrir les autres. Tant qu'il est fermé, la carte reçoit exactement la réponse qu'elle recevrait si elle était à jour.}}</span>
+								</div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Firmware de la carte}}</label>
+								<div class="col-sm-9">
+									<span class="form-control-static" id="span_glowscreen32Firmware">-</span>
+									<span class="help-block" style="margin:0;">{{La version que la carte a annoncée lors de son dernier appel. Elle vient de la carte, pas de Jeedom : tant qu'elle n'a pas interrogé un plugin qui sait la lire, elle reste inconnue.}}</span>
 								</div>
 							</div>
 						</fieldset>

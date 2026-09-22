@@ -66,7 +66,7 @@ row *GlowScreen32*.
 
 ## API contract
 
-The plugin implements the v1.3 contract shared with the firmware: three GET
+The plugin implements the v1.4 contract shared with the firmware: four GET
 actions, all authenticated.
 
 > **Changed in v1.3:** `id` is no longer a Jeedom command id, it is the
@@ -110,6 +110,41 @@ A button that starts a scenario is a plain-action button targeting a scenario;
 since ids are ranks, it needs no special convention (the negative-id convention
 of 1.0 is gone).
 
+## Over-the-air firmware updates
+
+`GET ...core/php/api.php?action=firmware&device=246f28123456&fw=1.3.0` answers
+either `{ "ok": true, "update": false }` or the full object with `version`,
+`url`, `sha256` and `size`. `fw` is the version the board is running; it is
+mandatory, and it also fills the **Firmware** column of the fleet table.
+
+This is the one feature where Jeedom can **permanently break** a screen from a
+distance, so there are **two independent locks**, both server side, both closed
+by default:
+
+| Lock | Where | Default |
+|---|---|---|
+| `ota_enabled` | plugin-wide, on the plugin page | **closed** |
+| `ota_allowed` | per screen, in the device's Screen tab | **closed** |
+
+**Both** must be open for a screen to get `update: true`. The per-screen lock is
+what makes a **staged rollout** possible — open one pilot screen, check it comes
+back online, then open the rest. The global lock is what **stops a bad firmware
+dead**: flip it off and the screens that have not updated yet keep polling and
+keep being told there is nothing new. A blocked board gets exactly the answer an
+up-to-date board gets: it cannot tell the difference, so it cannot work around
+it.
+
+Upload the `.bin` from the plugin page. The plugin refuses anything that does
+not start with byte `0xE9`, reads the version from the ESP-IDF application
+descriptor inside the image, computes the SHA-256 and the size itself, and
+stores the file under `data/firmware/`. That folder's binaries are excluded from
+`deploy-plugin.sh`, so redeploying the plugin does not wipe the uploaded
+firmware, and `data/firmware/.htaccess` reopens `.bin` files so the board can
+actually download them.
+
+Every OTA decision is logged, naming the version asked for, the answer, and
+which lock blocked it.
+
 ## Device commands
 
 | Command | Meaning |
@@ -117,6 +152,7 @@ of 1.0 is gone).
 | Layout version | the counter the board watches |
 | Last contact | stamped on every call received, `layout` as well as `ping`, rounded to the minute |
 | Last button | the label of the last button pressed |
+| Firmware version | the version the board reports, written only when it changes |
 
 ## Log
 

@@ -87,8 +87,69 @@ if (strpos($source, "setConfiguration('lastcontact'") === false) {
               . 'getConfiguration(\'lastcontact\') rendra de nouveau une chaîne vide.';
 }
 
+/* --- Le double verrou d'OTA du contrat v1.4 --------------------------------
+ * C'est le point de sécurité du plugin : deux verrous indépendants, fermés par
+ * défaut, tous deux côté serveur. Un refactoring qui en perdrait un laisserait
+ * un plugin qui marche, qui passe le php -l, et qui pousse un firmware sur tout
+ * le parc à la première occasion. */
+foreach (array('ota_enabled', 'ota_allowed', 'otaDecision', 'otaAllowed',
+               'otaEnabled', 'publishFirmware', 'noteFirmware') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : le double verrou d\'OTA du contrat v1.4 '
+                  . 'n\'est plus mis en oeuvre.';
+    }
+}
+
+/* Les deux verrous doivent être exigés ENSEMBLE. La formulation attendue est
+ * celle d'otaDecision() : on additionne les verrous fermés, et l'on refuse dès
+ * qu'il y en a un. Vérifier la présence des deux tests dans la même méthode,
+ * c'est vérifier que l'un n'a pas été rendu facultatif. */
+if (preg_match('/function otaDecision.*?\n    \}/s', $source, $methode)) {
+    foreach (array('self::otaEnabled()', '$this->otaAllowed()') as $verrou) {
+        if (strpos($methode[0], $verrou) === false) {
+            $echecs[] = 'otaDecision() ne consulte pas ' . $verrou . ' : un seul des deux '
+                      . 'verrous suffirait alors à pousser un firmware sur un écran.';
+        }
+    }
+    if (strpos($methode[0], 'firmware_unavailable') === false && strpos($source, 'firmware_unavailable') === false) {
+        $echecs[] = 'firmware_unavailable n\'apparaît nulle part : le cas « update annoncé, '
+                  . 'fichier disparu » du contrat v1.4 n\'est pas traité.';
+    }
+} else {
+    $echecs[] = 'otaDecision() est introuvable : la décision d\'OTA du contrat v1.4 n\'existe plus.';
+}
+
+/* --- Le firmware déposé doit survivre à un déploiement ---------------------
+ * deploy-plugin.sh fait un rsync --delete : sans cette exclusion, le premier
+ * redéploiement venu efface un binaire que le dépôt de développement ne
+ * contient pas, et les écrans se voient proposer une URL qui rend 404. */
+$deployignore = __DIR__ . '/../.deployignore';
+if (!file_exists($deployignore)) {
+    $echecs[] = '.deployignore est absent : le firmware téléversé sera effacé au prochain '
+              . 'déploiement par le rsync --delete de deploy-plugin.sh.';
+} elseif (strpos(file_get_contents($deployignore), 'data/firmware/*.bin') === false) {
+    $echecs[] = '.deployignore n\'exclut pas data/firmware/*.bin : le firmware téléversé '
+              . 'sera effacé au prochain déploiement.';
+}
+
+/* --- Le binaire doit être téléchargeable par la carte ---------------------
+ * data/.htaccess porte « Deny from all » : sans exception dans
+ * data/firmware/.htaccess, la carte reçoit un 403 au milieu de sa mise à jour.
+ * C'est exactement la panne qu'avait l'icône du plugin, au même endroit. */
+$htFirmware = __DIR__ . '/../data/firmware/.htaccess';
+if (!file_exists($htFirmware)) {
+    $echecs[] = 'data/firmware/.htaccess est absent : le « Deny from all » de data/ '
+              . 'interdira à la carte de télécharger le binaire.';
+} else {
+    $contenu = file_get_contents($htFirmware);
+    if (strpos($contenu, 'allow from all') === false || strpos($contenu, '.bin') === false) {
+        $echecs[] = 'data/firmware/.htaccess ne rouvre pas les fichiers .bin : la carte '
+                  . 'recevra un 403 au milieu de sa mise à jour.';
+    }
+}
+
 if (count($echecs) === 0) {
-    echo "OK — aucune propriété sans souligné, aucune méthode interdite.\n";
+    echo "OK — aucune propriété sans souligné, aucune méthode interdite, double verrou d'OTA en place.\n";
     exit(0);
 }
 foreach ($echecs as $echec) {

@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.2
+
+La mise à jour du firmware par le réseau (contrat d'API v1.4).
+
+- **`action=firmware`** : la carte annonce la version qu'elle exécute, le plugin
+  répond `update: false` ou l'objet complet avec `version`, `url`, `sha256` et
+  `size`. La carte vérifie l'empreinte avant de basculer.
+- **Double verrou d'autorisation, tous deux fermés par défaut** : `ota_enabled`,
+  global au plugin, et `ota_allowed`, propre à chaque écran. Les deux doivent
+  être ouverts pour qu'une mise à jour parte. Le verrou par écran permet le
+  déploiement progressif — un seul écran témoin, vérifié, puis les autres ; le
+  verrou global arrête net la propagation d'un firmware défectueux. Une carte
+  bloquée reçoit exactement la réponse d'une carte à jour : elle ne peut pas
+  faire la différence, donc pas passer outre.
+- **Dépôt du firmware depuis la page du plugin.** Un fichier qui ne commence pas
+  par l'octet `0xE9` est refusé — ce n'est pas une image d'application ESP32. La
+  version est lue dans le descripteur ESP-IDF du binaire, le SHA-256 et la
+  taille sont calculés sur le fichier écrit.
+- Le binaire est rangé dans `data/firmware/`, **exclu du déploiement** : un
+  `deploy-plugin.sh` n'efface pas le firmware déposé. `data/firmware/.htaccess`
+  rouvre les `.bin` que le `Deny from all` de `data/` interdirait à la carte.
+- **Suivi du parc** : la version annoncée par chaque écran est retenue (et
+  n'est écrite que lorsqu'elle change), exposée en commande d'information
+  « Version du firmware », et affichée dans le tableau du parc à côté de l'état
+  des deux verrous.
+- **Chaque décision d'OTA est journalisée** : la version annoncée, la réponse,
+  et le ou les verrous qui ont bloqué le cas échéant.
+- `tests/check-classes.php` vérifie en plus que les deux verrous sont toujours
+  exigés ensemble, que `.deployignore` protège le firmware déposé, et que
+  `data/firmware/.htaccess` laisse passer les `.bin`.
+
 ## 1.1
 
 Deux corrections issues d'un essai sur matériel réel.
