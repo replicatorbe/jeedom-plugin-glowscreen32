@@ -189,8 +189,85 @@ if (!file_exists($htFirmware)) {
     }
 }
 
+/* --- Le schéma 2 du contrat v2.0 ------------------------------------------
+ * La négociation de schéma est ce qui permet de publier ce plugin sans rendre
+ * le parc entier inutilisable au même instant. Un refactoring qui la perdrait
+ * laisserait un plugin qui marche parfaitement... devant des cartes qui
+ * n'affichent plus rien, et qui ne peuvent donc plus recevoir l'OTA qui les
+ * réparerait. */
+foreach (array('SCHEMA_LEGACY', 'SCHEMA_CURRENT', 'MODE_NAV', 'MAX_PAGES',
+               'MAX_BUTTONS_PER_PAGE', 'LEGACY_MAX_BUTTONS', 'legacyButtons',
+               'layoutLegacy', 'layoutV2', 'tzOffset', 'infoText', 'normalizeIcon') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : le schéma 2 du contrat v2.0 n\'est plus mis '
+                  . 'en oeuvre.';
+    }
+}
+
+$api = file_get_contents(__DIR__ . '/../core/php/api.php');
+if (strpos($api, 'HTTP_X_GLOWSCREEN32_SCHEMA') === false) {
+    $echecs[] = 'api.php ne lit plus l\'en-tête X-GLOWSCREEN32-SCHEMA : toutes les cartes '
+              . 'recevraient le même schéma, et celles qui ne savent pas le lire '
+              . 'n\'afficheraient plus rien.';
+}
+/* press() doit recevoir le schéma. C'est LE point délicat du contrat v2.0 :
+ * une carte de schéma 1 a reçu six boutons renumérotés de 0 à 5, sans les
+ * boutons « nav ». Résoudre son rang dans la numérotation globale ferait jouer
+ * le bouton d'à côté — et sur ce projet, le bouton d'à côté a déjà ouvert un
+ * portail. */
+if (!preg_match('/press\(\$id,\s*\$schema\)/', $api)) {
+    $echecs[] = 'api.php n\'transmet plus le schéma à press() : le rang reçu d\'une carte '
+              . 'de schéma 1 serait résolu dans le mauvais aplatissement, et un appui '
+              . 'jouerait la commande d\'un autre bouton.';
+}
+
+/* --- Le piège de la signature de mise en page -----------------------------
+ * buttonSignature() et layoutSignature() énumèrent leurs champs EN DUR. Un
+ * champ v2.0 oublié, et « version » ne bouge pas : l'enregistrement réussit, la
+ * page montre la nouvelle mise en page, et le mur affiche l'ancienne
+ * indéfiniment. Rien ne le signale. */
+if (preg_match('/function layoutSignature.*?\n    \}/s', $source, $methode)) {
+    foreach (array("'pages'", "'grid'", "'swipe'", "'clock'", "'info'") as $champ) {
+        if (strpos($methode[0], $champ) === false) {
+            $echecs[] = 'layoutSignature() ne tient pas compte de ' . $champ . ' : le modifier '
+                      . 'ne ferait plus bouger « version », et aucun écran du parc ne se '
+                      . 'redessinerait.';
+        }
+    }
+} else {
+    $echecs[] = 'layoutSignature() est introuvable : plus rien ne fait bouger « version ».';
+}
+if (preg_match('/function buttonSignature.*?\n    \}/s', $source, $methode)) {
+    foreach (array("\$_button['icon']", "\$_button['page']", "\$_button['slot']",
+                   "\$_button['nav']") as $champ) {
+        if (strpos($methode[0], $champ) === false) {
+            $echecs[] = 'buttonSignature() ne tient pas compte de ' . $champ . ' : déplacer '
+                      . 'un bouton ou changer son icône ne ferait plus bouger « version ».';
+        }
+    }
+} else {
+    $echecs[] = 'buttonSignature() est introuvable.';
+}
+
+/* --- L'aplatissement du schéma 1 ------------------------------------------
+ * Les boutons « nav » doivent en être exclus : une carte v1.4 ne connaît que
+ * « action » et « toggle », et dessinerait une tuile qui, à l'appui, recevrait
+ * unknown_button. */
+if (preg_match('/function legacyButtons.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'MODE_NAV') === false) {
+        $echecs[] = 'legacyButtons() n\'exclut plus les boutons de navigation : une carte '
+                  . 'de schéma 1 en dessinerait un, et l\'appui rendrait unknown_button.';
+    }
+    if (strpos($methode[0], 'LEGACY_MAX_BUTTONS') === false) {
+        $echecs[] = 'legacyButtons() ne borne plus l\'aplatissement à six boutons.';
+    }
+} else {
+    $echecs[] = 'legacyButtons() est introuvable : l\'aplatissement du schéma 1 n\'existe plus.';
+}
+
 if (count($echecs) === 0) {
-    echo "OK — aucune propriété sans souligné, aucune méthode interdite, double verrou d'OTA en place.\n";
+    echo "OK — aucune propriété sans souligné, aucune méthode interdite, double verrou d'OTA\n";
+    echo "     en place, négociation de schéma et signature de mise en page complètes.\n";
     exit(0);
 }
 foreach ($echecs as $echec) {

@@ -17,7 +17,7 @@
 
 /*
  * Le point d'entrée des écrans ESP32. Il met en oeuvre, à la lettre, le contrat
- * d'API v1.4 (docs/fr_FR/index.md) :
+ * d'API v2.0 (docs/fr_FR/index.md) :
  *
  *   GET ?action=layout&device=246f28123456     → la mise en page
  *   GET ?action=press&device=…&id=0            → jouer le bouton de RANG 0
@@ -30,6 +30,22 @@
  * déduit la commande, et son sens.
  *
  *   X-GLOWSCREEN32-APIKEY: <clé>               → l'authentification normale
+ *   X-GLOWSCREEN32-SCHEMA: 2                   → ce que la carte sait lire
+ *
+ * LA NÉGOCIATION DE SCHÉMA EST LA PIÈCE QUI REND TOUT LE RESTE POSSIBLE.
+ *
+ * Absent, vide ou « 1 » → le schéma 1 à l'identique, octet pour octet. « 2 » ou
+ * plus → le schéma 2. Le plugin ne répond JAMAIS au-dessus de ce qui est
+ * annoncé.
+ *
+ * Sans elle, publier ce plugin rendrait TOUS les écrans inutilisables au même
+ * instant : le plugin se déploie en une seconde et d'un seul coup, le parc se
+ * met à jour écran par écran, en OTA, sur plusieurs jours — et un écran qui
+ * n'affiche plus rien ne peut plus recevoir l'OTA qui le réparerait. Il
+ * faudrait décrocher chaque carte et la rebrancher en USB.
+ *
+ * Corollaire d'ordre de déploiement : LE PLUGIN PART TOUJOURS EN PREMIER, le
+ * firmware ensuite.
  *
  * Erreurs : bad_apikey 401, unknown_device 404, unknown_button 404,
  * firmware_unavailable 404, bad_request 400. Le corps est toujours du JSON,
@@ -80,7 +96,44 @@ function glowscreen32ApiError($_error, $_code, $_detail = '', $_level = 'info') 
     glowscreen32ApiSend($_code, array('ok' => false, 'error' => $_error));
 }
 
+/*
+ * Le schéma annoncé par la carte, ramené à 1 ou 2.
+ *
+ * Un en-tête PERSONNALISÉ n'arrive pas dans $_SERVER sous son nom : Apache le
+ * préfixe de HTTP_, met tout en majuscules et remplace les tirets par des
+ * soulignés — d'où HTTP_X_GLOWSCREEN32_SCHEMA. Le repli par getallheaders()
+ * couvre les configurations où cette réécriture n'a pas lieu ; la fonction
+ * n'existe pas sous tous les SAPI, d'où le function_exists().
+ *
+ * Tout ce qui n'est pas un nombre vaut 1 : une carte qui annonce n'importe quoi
+ * reçoit le schéma le plus ancien, c'est-à-dire celui qui a le plus de chances
+ * de lui convenir. Et tout ce qui dépasse 2 est RAMENÉ à 2 : on ne répond
+ * jamais au-dessus de ce qu'on sait servir.
+ */
+function glowscreen32ApiSchema() {
+    $raw = '';
+    if (isset($_SERVER['HTTP_X_GLOWSCREEN32_SCHEMA'])) {
+        $raw = $_SERVER['HTTP_X_GLOWSCREEN32_SCHEMA'];
+    } elseif (function_exists('getallheaders')) {
+        foreach (getallheaders() as $name => $value) {
+            if (strcasecmp($name, 'X-GLOWSCREEN32-SCHEMA') === 0) {
+                $raw = $value;
+                break;
+            }
+        }
+    }
+    $raw = trim((string) $raw);
+    if ($raw === '' || !is_numeric($raw)) {
+        return glowscreen32::SCHEMA_LEGACY;
+    }
+    return (((int) $raw) >= glowscreen32::SCHEMA_CURRENT)
+        ? glowscreen32::SCHEMA_CURRENT
+        : glowscreen32::SCHEMA_LEGACY;
+}
+
 try {
+    $schema = glowscreen32ApiSchema();
+
     /*
      * La clé arrive par en-tête, et non dans la chaîne de requête : celle-ci est
      * journalisée en clair par Apache à chaque appel, et une carte interroge
@@ -155,24 +208,23 @@ try {
      */
     $eqLogic->noteFirmware(init('fw'));
 
+    /*
+     * « states » a été ajouté au contrat en v1.2, et c'est lui qui fait tout le
+     * travail de fraîcheur : sans ce tableau, une lampe allumée depuis
+     * l'application ou un interrupteur mural laissait la pastille de l'écran
+     * périmée jusqu'au prochain rechargement complet de la mise en page.
+     *
+     * Il est dans le MÊME ORDRE que les « buttons » du layout servi dans le
+     * même schéma — c'est le schéma passé ici qui le garantit des deux côtés.
+     */
     if ($action == 'ping') {
         $eqLogic->noteContact();
-        glowscreen32ApiSend(200, array(
-            'ok'      => true,
-            'version' => $eqLogic->version(),
-            'time'    => time(),
-            /* Ajouté au contrat en v1.2. Même ordre que les « buttons » du
-             * layout — c'est activeButtons() qui le garantit des deux côtés.
-             * Sans ce tableau, une lampe allumée depuis l'application ou un
-             * interrupteur mural laissait la pastille de l'écran périmée
-             * jusqu'au prochain rechargement complet de la mise en page. */
-            'states'  => $eqLogic->states(),
-        ));
+        glowscreen32ApiSend(200, $eqLogic->ping($schema));
     }
 
     if ($action == 'layout') {
         $eqLogic->noteContact();
-        glowscreen32ApiSend(200, $eqLogic->layout());
+        glowscreen32ApiSend(200, $eqLogic->layout($schema));
     }
 
     /* --- firmware --------------------------------------------------------- */
@@ -226,7 +278,14 @@ try {
         glowscreen32ApiError('bad_request', 400, __('paramètre id absent ou invalide', __FILE__));
     }
 
-    $result = $eqLogic->press($id);
+    /*
+     * Le schéma est passé à press(), et ce n'est pas une précaution de style :
+     * le rang reçu doit être résolu DANS L'APLATISSEMENT qui a servi le layout
+     * à CETTE carte. Une carte de schéma 1 a reçu six boutons renumérotés 0 à
+     * 5, sans les boutons « nav » ; son rang 2 ne désigne pas forcément le
+     * bouton d'id global 2. Les confondre ferait jouer le bouton d'à côté.
+     */
+    $result = $eqLogic->press($id, $schema);
     if ($result === null) {
         glowscreen32ApiError('unknown_button', 404, sprintf(
             __('%1$s : aucun bouton de rang %2$s dans la mise en page', __FILE__),

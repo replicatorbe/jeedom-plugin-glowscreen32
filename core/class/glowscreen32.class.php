@@ -42,9 +42,74 @@ require_once __DIR__ . '/../../../../core/php/core.inc.php';
  */
 class glowscreen32 extends eqLogic {
 
-    /* Grille 3×2 sur un écran 320×240 : six boutons, pas un de plus. La limite
-     * est celle du contrat, pas une préférence d'affichage. */
-    const MAX_BUTTONS = 6;
+    /*
+     * Les plafonds du contrat v2.0. Ils sont NORMATIFS des deux côtés : les
+     * dépassements sont refusés à l'enregistrement, et journalisés — jamais
+     * absorbés en silence, ce qui était le défaut de la v1.4 côté firmware.
+     *
+     *   MAX_BUTTONS          — 32 boutons par écran (struct Layout en NVS)
+     *   MAX_PAGES            — 4 pages, au-delà on cherche un bouton au lieu
+     *                          de l'appuyer
+     *   MAX_BUTTONS_PER_PAGE — 12, soit cols ≤ 4 × rows ≤ 3
+     *   LEGACY_MAX_BUTTONS   — 6, la grille 3×2 du schéma 1, et RIEN d'autre :
+     *                          c'est tout ce qu'une carte v1.4 sait dessiner
+     */
+    const MAX_BUTTONS          = 32;
+    const MAX_PAGES            = 4;
+    const MAX_BUTTONS_PER_PAGE = 12;
+    const LEGACY_MAX_BUTTONS   = 6;
+
+    /*
+     * Les deux schémas du contrat.
+     *
+     * La carte annonce ce qu'elle sait lire en en-tête X-GLOWSCREEN32-SCHEMA.
+     * Absent, vide ou 1 → le schéma 1 à l'identique, octet pour octet. 2 ou
+     * plus → le schéma 2. Le plugin ne répond JAMAIS au-dessus de ce qui est
+     * annoncé : le plugin se déploie d'un seul coup, le parc se met à jour
+     * écran par écran, et un écran qui n'affiche plus rien ne peut plus
+     * recevoir l'OTA qui le réparerait.
+     */
+    const SCHEMA_LEGACY  = 1;
+    const SCHEMA_CURRENT = 2;
+
+    /* Plafond de la réponse, côté firmware (JEEDOM_JSON_MAX). Le dépassement
+     * n'est pas tronqué ici — il n'y a rien à tronquer qui garde un sens — mais
+     * il est journalisé, faute de quoi la carte rejetterait la mise en page
+     * sans que rien, côté serveur, ne dise pourquoi. */
+    const MAX_PAYLOAD = 8192;
+
+    /* Longueurs du contrat. */
+    const LABEL_MAX = 24;
+    const TITLE_MAX = 24;
+    const INFO_MAX  = 16;
+
+    /* La grille par défaut du schéma 2. Le contrat impose cols ∈ {3,4} et
+     * rows ∈ {2,3} ; une carte de schéma 1, elle, ne connaît que 3×2. */
+    const DEFAULT_COLS = 3;
+    const DEFAULT_ROWS = 3;
+
+    /*
+     * Le vocabulaire d'icônes, FERMÉ — contrat v2.0.
+     *
+     * Le firmware embarque un jeu fini de glyphes et convertit le nom en
+     * identifiant numérique au parsing : 1 octet par bouton au lieu de 12. Un
+     * nom inconnu y vaut « none », et la tuile se rabat sur son seul libellé.
+     *
+     * Côté Jeedom, le champ est donc une LISTE DÉROULANTE et non un champ
+     * texte : sans cela la liste dérive en silence et l'utilisateur configure
+     * des icônes qui ne s'afficheront jamais. L'ordre est celui du contrat, et
+     * la page de configuration le reprend tel quel.
+     */
+    const ICON_NONE = 'none';
+    const ICONS = array(
+        'none',
+        'bulb', 'lamp', 'ceiling', 'strip', 'plug', 'power',
+        'gate', 'garage', 'door', 'window', 'shutter', 'blind', 'lock',
+        'heat', 'cool', 'fan', 'thermo', 'water', 'valve',
+        'tv', 'music', 'speaker', 'camera', 'alarm', 'shield',
+        'scene', 'movie', 'night', 'sun', 'moon', 'coffee',
+        'folder', 'home', 'grid', 'car', 'mower', 'vacuum', 'bell', 'clock',
+    );
 
     /* Intervalle de rafraîchissement conseillé à la carte, en secondes. Le
      * « ping » qui l'utilise ne transfère que trois champs : une valeur basse
@@ -71,6 +136,20 @@ class glowscreen32 extends eqLogic {
      */
     const MODE_ACTION = 'action';
     const MODE_TOGGLE = 'toggle';
+
+    /*
+     * MODE_NAV — contrat v2.0. Ouvre une autre page de l'écran, et rien de
+     * plus : aucune commande, aucun scénario, aucun état. La navigation est
+     * ENTIÈREMENT LOCALE à la carte, donc instantanée et fonctionnelle hors
+     * réseau — un écran coupé de Jeedom continue de naviguer depuis son cache
+     * NVS.
+     *
+     * Conséquence côté plugin : il n'a rien à résoudre pour un bouton « nav »,
+     * son état vaut toujours null, et un « press » reçu sur son rang signale un
+     * firmware en désaccord avec la configuration — unknown_button, et une
+     * ligne de journal.
+     */
+    const MODE_NAV = 'nav';
 
     /* Les deux formes d'action qu'un bouton en mode « action » sait déclencher. */
     const TARGET_NONE     = '';
@@ -248,8 +327,15 @@ class glowscreen32 extends eqLogic {
      */
     public static function sanitizeButtons($_buttons) {
         $buttons = array();
+        $rank    = 0;
         foreach ($_buttons as $stored) {
             if (count($buttons) >= self::MAX_BUTTONS) {
+                /* Journalisé, jamais absorbé en silence : c'est exactement le
+                 * défaut que la v1.4 avait côté firmware — un écran affichait
+                 * calmement 6 boutons sur 8 et personne ne pouvait le savoir. */
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('Mise en page tronquée : plus de %s boutons enregistrés, les suivants sont ignorés.', __FILE__),
+                    self::MAX_BUTTONS));
                 break;
             }
             if (!is_array($stored)) {
@@ -257,7 +343,7 @@ class glowscreen32 extends eqLogic {
             }
 
             $mode = isset($stored['mode']) ? (string) $stored['mode'] : self::MODE_ACTION;
-            if ($mode !== self::MODE_TOGGLE) {
+            if ($mode !== self::MODE_TOGGLE && $mode !== self::MODE_NAV) {
                 $mode = self::MODE_ACTION;
             }
 
@@ -266,14 +352,48 @@ class glowscreen32 extends eqLogic {
                 $target = self::TARGET_NONE;
             }
 
+            /*
+             * Page et case — contrat v2.0, et MIGRATION IMPLICITE.
+             *
+             * Une configuration v1 n'a ni l'une ni l'autre : le bouton tombe
+             * alors sur la page d'accueil, à la case de son RANG dans le
+             * tableau. C'est très exactement la mise en page qu'il avait, et
+             * aucun script de migration n'a donc à être écrit ni lancé — une
+             * configuration existante continue de marcher telle quelle, y
+             * compris si personne ne rouvre jamais l'équipement.
+             */
+            $page = isset($stored['page']) ? (int) $stored['page'] : 0;
+            if ($page < 0 || $page >= self::MAX_PAGES) {
+                $page = 0;
+            }
+            $slot = isset($stored['slot']) ? (int) $stored['slot'] : $rank;
+            if ($slot < 0 || $slot >= self::MAX_BUTTONS_PER_PAGE) {
+                $slot = ($rank < self::MAX_BUTTONS_PER_PAGE) ? $rank : 0;
+            }
+
+            /* La page visée par un bouton « nav ». -1 = non renseignée : le
+             * bouton est alors incomplet, et activeButtons() le dit. Elle ne
+             * peut pas s'appeler « page », qui est déjà la page OÙ SE TROUVE le
+             * bouton. */
+            $nav = isset($stored['nav']) ? (int) $stored['nav'] : -1;
+            if ($nav < 0 || $nav >= self::MAX_PAGES) {
+                $nav = -1;
+            }
+
             $buttons[] = array(
-                'label'    => self::trimText(isset($stored['label']) ? $stored['label'] : '', 24),
+                'label'    => self::trimText(isset($stored['label']) ? $stored['label'] : '', self::LABEL_MAX),
                 'color'    => self::normalizeColor(isset($stored['color']) ? $stored['color'] : ''),
-                /* L'icône est du texte libre en v1 : le firmware décide de ce
-                 * qu'il sait dessiner, le plugin n'a pas à tenir sa liste et à
-                 * refuser un nom qu'une version plus récente comprendrait. */
-                'icon'     => self::trimText(isset($stored['icon']) ? $stored['icon'] : '', 24),
+                /* Vocabulaire FERMÉ depuis la v2.0 : le firmware convertit le
+                 * nom en identifiant numérique au parsing, et ne sait donc
+                 * dessiner que ceux qu'il connaît. Jeedom ne doit pas pouvoir
+                 * en proposer d'autres. */
+                'icon'     => self::normalizeIcon(isset($stored['icon']) ? $stored['icon'] : ''),
                 'mode'     => $mode,
+                /* --- mise en page, contrat v2.0 --- */
+                'page'     => $page,
+                'slot'     => $slot,
+                /* --- mode « nav » --- */
+                'nav'      => $nav,
                 /* --- mode « action » --- */
                 'target'   => $target,
                 'cmd'      => self::trimCmd($stored, 'cmd'),
@@ -290,8 +410,211 @@ class glowscreen32 extends eqLogic {
                  * « toggle » : sans elle, rien ne décide du sens. */
                 'state'    => self::trimCmd($stored, 'state'),
             );
+            $rank++;
         }
         return $buttons;
+    }
+
+    /*
+     * Un nom d'icône du vocabulaire fermé, ou « none ».
+     *
+     * Le champ vide vaut « none » : le contrat ne connaît pas d'autre façon de
+     * dire « pas d'icône », et le firmware v1.4 ne dessinait de toute façon
+     * aucune icône — la valeur y était de la donnée morte dans le blob NVS.
+     */
+    public static function normalizeIcon($_icon) {
+        $icon = strtolower(trim((string) $_icon));
+        return in_array($icon, self::ICONS, true) ? $icon : self::ICON_NONE;
+    }
+
+    /* ============================================================ PAGES */
+
+    /*
+     * Les pages de l'écran — contrat v2.0.
+     *
+     * Toujours MAX_PAGES entrées, renseignées ou non : la page est désignée par
+     * son RANG, et un tableau creux ferait dépendre l'identité d'une page de
+     * l'ordre d'enregistrement. La page 0 est la page d'accueil ; son parent
+     * n'a pas de sens et n'est pas rendu à la carte.
+     */
+    public function pages() {
+        return self::sanitizePages($this->getConfiguration('pages', array()));
+    }
+
+    public static function sanitizePages($_pages) {
+        $pages = array();
+        for ($id = 0; $id < self::MAX_PAGES; $id++) {
+            $raw = (is_array($_pages) && isset($_pages[$id]) && is_array($_pages[$id]))
+                ? $_pages[$id] : array();
+
+            /*
+             * La page vers laquelle remonte le bouton « retour ». Une page qui
+             * serait son propre parent, ou qui viserait une page inexistante,
+             * remonte à l'accueil : une boucle de retour est un écran dont on
+             * ne peut plus sortir sans couper le courant.
+             */
+            $parent = isset($raw['parent']) ? (int) $raw['parent'] : 0;
+            if ($parent < 0 || $parent >= self::MAX_PAGES || $parent === $id) {
+                $parent = 0;
+            }
+
+            $pages[$id] = array(
+                'title'  => self::trimText(isset($raw['title']) ? $raw['title'] : '', self::TITLE_MAX),
+                'parent' => ($id === 0) ? 0 : $parent,
+            );
+        }
+        return $pages;
+    }
+
+    /* Le titre affiché au bandeau pour cette page. À défaut de titre saisi, le
+     * nom de l'écran pour l'accueil — c'est ce que la carte affichait déjà — et
+     * « Page N » pour les autres : un bandeau vide ne dit pas où l'on est. */
+    public function pageTitle($_id) {
+        $pages = $this->pages();
+        $title = isset($pages[$_id]) ? $pages[$_id]['title'] : '';
+        if ($title !== '') {
+            return $title;
+        }
+        return ($_id === 0)
+            ? self::trimText($this->getName(), self::TITLE_MAX)
+            : sprintf(__('Page %s', __FILE__), $_id + 1);
+    }
+
+    /* Le nombre de pages réellement servies à la carte. Toujours au moins une :
+     * l'accueil existe même vide. */
+    public function pageCount() {
+        return count($this->layoutV2()['pages']);
+    }
+
+    /* ====================================================== GRILLE ET BANDEAU */
+
+    /*
+     * La grille de l'écran — contrat v2.0, cols ∈ {3,4}, rows ∈ {2,3}.
+     *
+     * Défaut 3×3, y compris pour un écran configuré avant la v2.0 : ses boutons
+     * occupent les cases 0 à 5, exactement là où la grille 3×2 les mettait, et
+     * la troisième rangée reste libre. Une valeur aberrante venue d'une
+     * restauration retombe sur le défaut plutôt que de faire dessiner à la
+     * carte une grille qu'elle refuserait.
+     */
+    public function grid() {
+        $grid = $this->getConfiguration('grid', array());
+        $cols = (is_array($grid) && isset($grid['cols'])) ? (int) $grid['cols'] : self::DEFAULT_COLS;
+        $rows = (is_array($grid) && isset($grid['rows'])) ? (int) $grid['rows'] : self::DEFAULT_ROWS;
+        if ($cols !== 3 && $cols !== 4) {
+            $cols = self::DEFAULT_COLS;
+        }
+        if ($rows !== 2 && $rows !== 3) {
+            $rows = self::DEFAULT_ROWS;
+        }
+        return array('cols' => $cols, 'rows' => $rows);
+    }
+
+    /* Le nombre de cases réellement disponibles sur une page. Le plafond du
+     * contrat (12) et celui de la grille sont deux limites différentes, et
+     * c'est la plus basse qui s'applique. */
+    public function pageCapacity() {
+        $grid = $this->grid();
+        return min(self::MAX_BUTTONS_PER_PAGE, $grid['cols'] * $grid['rows']);
+    }
+
+    /* Le changement de page au balayage. Fermé par défaut : sur un écran
+     * tactile résistif, un balayage involontaire est vite arrivé, et changer de
+     * page sous le doigt de quelqu'un qui visait un bouton est pire que de
+     * l'obliger à passer par un bouton « nav ». */
+    public function swipe() {
+        return ((int) $this->getConfiguration('swipe', 0)) === 1;
+    }
+
+    /* L'heure au bandeau. Elle vient de « time + tzoffset », recalés à chaque
+     * ping et égrenés localement entre deux : pas de NTP, le serveur est déjà
+     * la référence de temps et une carte sans Internet doit continuer à donner
+     * l'heure. */
+    public function clock() {
+        return ((int) $this->getConfiguration('clock', 0)) === 1;
+    }
+
+    /*
+     * Le décalage horaire local, en secondes, DST COMPRISE — contrat v2.0.
+     *
+     * Calculé à partir du fuseau de Jeedom, jamais codé en dur : un décalage
+     * figé à 3600 donnerait une heure fausse la moitié de l'année, et une heure
+     * fausse au bandeau est pire qu'une absence d'heure, puisque rien ne la
+     * signale. getOffset() sur l'instant courant est la seule forme qui tienne
+     * compte de l'heure d'été.
+     */
+    public static function tzOffset() {
+        $name = trim((string) config::byKey('timezone'));
+        try {
+            $zone = new DateTimeZone(($name !== '') ? $name : date_default_timezone_get());
+        } catch (Throwable $e) {
+            try {
+                $zone = new DateTimeZone(date_default_timezone_get());
+            } catch (Throwable $e2) {
+                return 0;
+            }
+        }
+        return (int) $zone->getOffset(new DateTime('now', $zone));
+    }
+
+    /*
+     * Le texte du bandeau — contrat v2.0.
+     *
+     * C'est le PLUGIN qui formate : il connaît la commande choisie, son unité
+     * et son arrondi ; la carte ne fait qu'afficher. Même principe que pour
+     * « id » : le plugin décide, la carte affiche. Une chaîne plutôt qu'un
+     * nombre et une unité laisse mettre au bandeau une température, une
+     * humidité, une puissance ou un niveau de cuve sans qu'une seule ligne du
+     * firmware ait à changer — et sans OTA pour ajouter une unité.
+     *
+     * Rend null si rien n'est configuré, si la commande a disparu, ou si elle
+     * ne rend rien : le contrat prévoit null pour exactement ces cas.
+     */
+    public function infoText() {
+        $reference = trim((string) $this->getConfiguration('info_cmd', ''));
+        if ($reference === '') {
+            return null;
+        }
+        try {
+            $cmd = cmd::byString($reference);
+        } catch (Throwable $e) {
+            $cmd = null;
+        }
+        if (!is_object($cmd) || $cmd->getType() != 'info') {
+            return null;
+        }
+
+        $value = $cmd->execCmd();
+        if ($value === null || is_array($value) || trim((string) $value) === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            $number = round((float) $value, 1);
+            /* « 21 °C » et non « 21.0 °C » : le bandeau a seize caractères, et
+             * un zéro décimal qui ne dit rien en mange deux. */
+            $text = (abs($number - round($number)) < 0.05)
+                ? (string) (int) round($number)
+                : number_format($number, 1, '.', '');
+            $unit = trim((string) $cmd->getUnite());
+            if ($unit !== '') {
+                $text .= ' ' . $unit;
+            }
+        } else {
+            $text = trim(strip_tags((string) $value));
+        }
+
+        if (mb_strlen($text) > self::INFO_MAX) {
+            /* Au niveau « debug » et non « warning » : le bandeau est recalculé
+             * à chaque ping, c'est-à-dire toutes les trente secondes et par
+             * écran. Une ligne d'avertissement par ping rendrait le journal
+             * illisible au moment précis où l'on en a besoin. */
+            log::add('glowscreen32', 'debug', sprintf(
+                __('%1$s : le bandeau « %2$s » dépasse %3$s caractères, il est coupé.', __FILE__),
+                $this->getHumanName(), $text, self::INFO_MAX));
+            $text = mb_substr($text, 0, self::INFO_MAX);
+        }
+        return $text;
     }
 
     /* Un champ de désignation de commande, tel qu'il sort du formulaire. */
@@ -375,6 +698,12 @@ class glowscreen32 extends eqLogic {
      * « Allumer » est celle dont le nom décrit le mieux ce que le bouton fait.
      */
     public static function buttonMainCmd($_button) {
+        /* Un bouton « nav » ne commande rien : toute recherche de commande le
+         * concernant est une erreur de raisonnement, et rendre null ici la rend
+         * inoffensive partout à la fois. */
+        if ($_button['mode'] === self::MODE_NAV) {
+            return null;
+        }
         if ($_button['mode'] === self::MODE_TOGGLE) {
             foreach (array('on', 'toggle', 'off') as $slot) {
                 $cmd = self::actionCmd($_button, $slot);
@@ -406,6 +735,13 @@ class glowscreen32 extends eqLogic {
      * Ce qui est rendu est toujours une commande d'information.
      */
     public static function buttonStateCmd($_button) {
+        /* Contrat v2.0 : l'état d'un bouton « nav » est TOUJOURS null. Le
+         * garde-fou est ici et non chez l'appelant, pour qu'une commande
+         * d'état restée dans la configuration après un changement de mode ne
+         * fasse pas allumer une pastille sous un bouton de navigation. */
+        if ($_button['mode'] === self::MODE_NAV) {
+            return null;
+        }
         if (isset($_button['state']) && $_button['state'] !== '') {
             try {
                 $state = cmd::byString($_button['state']);
@@ -460,6 +796,12 @@ class glowscreen32 extends eqLogic {
      * bouton renseigné mais cassé, qui mérite une ligne de journal.
      */
     public static function buttonConfigured($_button) {
+        if ($_button['mode'] === self::MODE_NAV) {
+            /* Choisir le mode « nav » EST l'intention : un bouton de
+             * navigation sans page visée est un bouton qu'on a commencé à
+             * remplir, et mérite donc la ligne de journal. */
+            return true;
+        }
         if ($_button['mode'] === self::MODE_TOGGLE) {
             return $_button['on'] !== '' || $_button['off'] !== ''
                 || $_button['toggle'] !== '' || $_button['state'] !== '';
@@ -476,6 +818,14 @@ class glowscreen32 extends eqLogic {
      * qu'à moitié.
      */
     public static function buttonResolves($_button) {
+        if ($_button['mode'] === self::MODE_NAV) {
+            /* Une page visée, et pas la sienne : un bouton qui ouvrirait la
+             * page où il se trouve déjà est un bouton mort, et l'utilisateur
+             * conclurait que l'écran ne répond plus. */
+            return $_button['nav'] >= 0
+                && $_button['nav'] < self::MAX_PAGES
+                && $_button['nav'] !== $_button['page'];
+        }
         if ($_button['mode'] === self::MODE_TOGGLE) {
             return self::buttonStateCmd($_button) !== null
                 && self::buttonMainCmd($_button) !== null;
@@ -504,7 +854,9 @@ class glowscreen32 extends eqLogic {
      * l'utilisateur voit un écran qui perd un bouton sans explication.
      */
     public function activeButtons() {
-        $active = array();
+        $capacity = $this->pageCapacity();
+        $byPage   = array();
+
         foreach ($this->buttons() as $index => $button) {
             if (!self::buttonResolves($button)) {
                 if (self::buttonConfigured($button)) {
@@ -515,32 +867,171 @@ class glowscreen32 extends eqLogic {
                 }
                 continue;
             }
-            $active[] = $button;
+
+            $page = $button['page'];
+            if (!isset($byPage[$page])) {
+                $byPage[$page] = array();
+            }
+
+            /*
+             * La case demandée peut être hors de la grille — l'utilisateur a
+             * réduit la grille après coup — ou déjà prise. Le bouton est alors
+             * DÉPLACÉ vers la première case libre plutôt qu'écarté : un écran
+             * qui perd un bouton parce qu'on est passé de 4×3 à 3×2 serait
+             * incompréhensible. Le déplacement est journalisé.
+             */
+            $slot = $button['slot'];
+            if ($slot >= $capacity || isset($byPage[$page][$slot])) {
+                $free = -1;
+                for ($candidate = 0; $candidate < $capacity; $candidate++) {
+                    if (!isset($byPage[$page][$candidate])) {
+                        $free = $candidate;
+                        break;
+                    }
+                }
+                if ($free < 0) {
+                    /* Là, il n'y a plus de place du tout : c'est une
+                     * TRONCATURE, et le contrat v2.0 interdit de l'absorber en
+                     * silence. */
+                    log::add('glowscreen32', 'warning', sprintf(
+                        __('%1$s : la page %2$s est pleine (%3$s cases), le bouton %4$s n\'est pas envoyé à l\'écran.', __FILE__),
+                        $this->getHumanName(), $page + 1, $capacity, $index + 1));
+                    continue;
+                }
+                log::add('glowscreen32', 'debug', sprintf(
+                    __('%1$s : le bouton %2$s visait la case %3$s de la page %4$s, occupée ou hors grille ; il est placé en case %5$s.', __FILE__),
+                    $this->getHumanName(), $index + 1, $slot, $page + 1, $free));
+                $slot = $free;
+            }
+
+            $button['slot']        = $slot;
+            $byPage[$page][$slot]  = $button;
+        }
+
+        /*
+         * L'aplatissement : page par page, case par case. C'est LUI qui définit
+         * l'« id » global du contrat v2.0 — un rang continu 0 … N-1 sur tout
+         * l'écran, et non un rang par page.
+         *
+         * Un rang par page recréerait l'ambiguïté que la v1.3 avait éliminée :
+         * le bouton 0 de la page 1 et celui de la page 0 porteraient le même
+         * id, et le plugin devrait se fier à un second champ envoyé par la
+         * carte pour les distinguer — c'est-à-dire redonner à la carte une
+         * parcelle d'autorité sur la résolution de la commande.
+         */
+        $active = array();
+        for ($page = 0; $page < self::MAX_PAGES; $page++) {
+            if (!isset($byPage[$page])) {
+                continue;
+            }
+            ksort($byPage[$page]);
+            foreach ($byPage[$page] as $button) {
+                $active[] = $button;
+            }
         }
         return $active;
     }
 
-    public function layout() {
-        $buttons = array();
-        foreach ($this->activeButtons() as $rank => $button) {
-            $label = $button['label'];
-            if ($label === '') {
-                /* Un bouton sans libellé vaut mieux que pas de bouton : on
-                 * reprend le nom de ce qu'il déclenche, qui est au moins exact. */
-                $cmd = self::buttonMainCmd($button);
-                if ($cmd !== null) {
-                    $label = self::trimText($cmd->getName(), 24);
-                } else {
-                    $scenario = self::buttonScenario($button);
-                    $label = ($scenario !== null) ? self::trimText($scenario->getName(), 24) : '';
-                }
+    /*
+     * ============================ APLATISSEMENT DU SCHÉMA 1 ============================
+     *
+     * Ce que voit une carte qui n'annonce pas de schéma : les SIX PREMIERS
+     * boutons, renumérotés 0 à 5 DANS CET APLATISSEMENT.
+     *
+     * Deux règles, et elles ne sont pas décoratives :
+     *
+     *  - les boutons « nav » en sont EXCLUS. Une carte v1.4 ne connaît que
+     *    « action » et « toggle » ; un mode inconnu la ferait dessiner une
+     *    tuile qui, à l'appui, recevrait unknown_button. Mieux vaut qu'elle ne
+     *    la voie jamais.
+     *  - la renumérotation est CONTINUE. L'id envoyé à une carte de schéma 1
+     *    n'est donc PAS l'id global du schéma 2 dès qu'il existe un bouton
+     *    « nav » avant lui, ou plus de six boutons.
+     *
+     * D'où le point délicat de tout ce travail : « press » doit résoudre le
+     * rang reçu DANS LE MÊME APLATISSEMENT que celui qui a servi le « layout ».
+     * C'est pour cela que press() reçoit le schéma négocié, et non une valeur
+     * par défaut. Une carte de schéma 1 qui enverrait son rang 2 et qu'on
+     * résoudrait dans la numérotation globale allumerait le bouton d'à côté —
+     * et sur ce projet, « le bouton d'à côté » a déjà ouvert un portail.
+     */
+    public function legacyButtons() {
+        $legacy   = array();
+        $dropped  = 0;
+        foreach ($this->activeButtons() as $button) {
+            if ($button['mode'] === self::MODE_NAV) {
+                continue;
             }
+            if (count($legacy) >= self::LEGACY_MAX_BUTTONS) {
+                $dropped++;
+                continue;
+            }
+            $legacy[] = $button;
+        }
+        if ($dropped > 0) {
+            /* Journalisé — mais au niveau « debug » : une carte de schéma 1
+             * interroge toutes les trente secondes, et une ligne
+             * d'avertissement par ping noierait le journal. Le mode dégradé est
+             * un choix assumé du contrat, pas un incident. */
+            log::add('glowscreen32', 'debug', sprintf(
+                __('%1$s : servi en schéma 1, %2$s bouton(s) au-delà des six premiers ne sont pas envoyés.', __FILE__),
+                $this->getHumanName(), $dropped));
+        }
+        return $legacy;
+    }
 
+    /* Le libellé d'un bouton : le sien, ou à défaut le nom de ce qu'il
+     * déclenche — qui est au moins exact. Un bouton sans libellé vaut mieux que
+     * pas de bouton. */
+    public function buttonLabel($_button) {
+        if ($_button['label'] !== '') {
+            return $_button['label'];
+        }
+        $cmd = self::buttonMainCmd($_button);
+        if ($cmd !== null) {
+            return self::trimText($cmd->getName(), self::LABEL_MAX);
+        }
+        $scenario = self::buttonScenario($_button);
+        if ($scenario !== null) {
+            return self::trimText($scenario->getName(), self::LABEL_MAX);
+        }
+        /* Un bouton « nav » sans libellé prend le titre de la page qu'il
+         * ouvre : c'est ce que l'utilisateur voulait écrire. */
+        if ($_button['mode'] === self::MODE_NAV) {
+            return self::trimText($this->pageTitle($_button['nav']), self::LABEL_MAX);
+        }
+        return '';
+    }
+
+    /*
+     * La mise en page, dans le schéma NÉGOCIÉ.
+     *
+     * Le défaut est le schéma 1 : tout appelant interne qui ne se pose pas la
+     * question — une page d'administration, un contrôle — doit recevoir ce que
+     * la v1.4 rendait, et non une structure que rien d'autre ne saurait lire.
+     * Seul le point d'entrée des cartes, qui lit l'en-tête, demande le schéma 2.
+     */
+    public function layout($_schema = self::SCHEMA_LEGACY) {
+        return (((int) $_schema) >= self::SCHEMA_CURRENT)
+            ? $this->layoutV2()
+            : $this->layoutLegacy();
+    }
+
+    /*
+     * Le schéma 1, INCHANGÉ depuis la v1.2 — octet pour octet.
+     *
+     * Rien ne doit bouger ici : les champs, leur ordre, leurs types. Une carte
+     * de schéma 1 qui interroge ce plugin doit recevoir exactement ce qu'un
+     * plugin v1.4 lui rendait.
+     */
+    public function layoutLegacy() {
+        $buttons = array();
+        foreach ($this->legacyButtons() as $rank => $button) {
             $buttons[] = array(
-                /* Le RANG, pas un identifiant de commande — contrat v1.3. La
-                 * carte le traite comme opaque et le renvoie tel quel. */
+                /* Le RANG dans CET aplatissement, pas l'id global du schéma 2,
+                 * et pas un identifiant de commande — contrat v1.3. */
                 'id'    => $rank,
-                'label' => $label,
+                'label' => $this->buttonLabel($button),
                 'color' => $button['color'],
                 'icon'  => $button['icon'],
                 'mode'  => $button['mode'],
@@ -559,6 +1050,104 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
+     * Le schéma 2. ADDITIF : aucun champ de la v1.4 ne change de sens, de type,
+     * ni ne disparaît — c'est précisément ce que la v1.3 n'avait pas su faire
+     * avec « id », et ce qui lui a coûté une rupture.
+     */
+    public function layoutV2() {
+        $active = $this->activeButtons();
+        $pages  = $this->pages();
+
+        /* Les pages à envoyer : l'accueil toujours, celles qui portent au moins
+         * un bouton, et celles qu'un bouton « nav » vise — une page vide mais
+         * atteignable reste une page, et la carte doit savoir l'afficher plutôt
+         * que de rester sur un bouton qui ne fait rien. */
+        $used = array(0 => true);
+        foreach ($active as $button) {
+            $used[$button['page']] = true;
+            if ($button['mode'] === self::MODE_NAV) {
+                $used[$button['nav']] = true;
+            }
+        }
+
+        $buttonsByPage = array();
+        $states        = array();
+        foreach ($active as $id => $button) {
+            $state    = self::buttonState($button);
+            $states[] = $state;
+
+            $entry = array(
+                /* L'id GLOBAL à l'écran entier — contrat v2.0. Opaque pour la
+                 * carte, qui le renvoie tel quel à « press ». « page » et
+                 * « slot » ne servent QU'À LA MISE EN PAGE. */
+                'id'    => $id,
+                'slot'  => $button['slot'],
+                'label' => $this->buttonLabel($button),
+                'color' => $button['color'],
+                'icon'  => $button['icon'],
+                'mode'  => $button['mode'],
+            );
+            if ($button['mode'] === self::MODE_NAV) {
+                $entry['page'] = $button['nav'];
+            }
+            $entry['state'] = $state;
+
+            $buttonsByPage[$button['page']][] = $entry;
+        }
+
+        $payload = array();
+        for ($id = 0; $id < self::MAX_PAGES; $id++) {
+            if (!isset($used[$id])) {
+                continue;
+            }
+            $page = array(
+                'id'    => $id,
+                'title' => $this->pageTitle($id),
+            );
+            /* Absent sur la page 0 : l'accueil n'a pas de « retour ». */
+            if ($id > 0) {
+                $page['parent'] = $pages[$id]['parent'];
+            }
+            $page['buttons'] = isset($buttonsByPage[$id]) ? $buttonsByPage[$id] : array();
+            $payload[] = $page;
+        }
+
+        $grid   = $this->grid();
+        $answer = array(
+            'ok'       => true,
+            'schema'   => self::SCHEMA_CURRENT,
+            'device'   => self::normalizeMac($this->getConfiguration('mac', '')),
+            'name'     => $this->getName(),
+            'version'  => $this->version(),
+            'poll'     => $this->poll(),
+            'grid'     => $grid,
+            'ui'       => array('swipe' => $this->swipe(), 'clock' => $this->clock()),
+            'info'     => $this->infoText(),
+            'time'     => time(),
+            'tzoffset' => self::tzOffset(),
+            'pages'    => $payload,
+            'states'   => $states,
+        );
+
+        /*
+         * Le plafond de 8 192 octets est celui du firmware (JEEDOM_JSON_MAX).
+         * Le dépasser ne se tronque pas — une mise en page coupée au milieu
+         * d'un bouton n'est pas du JSON — mais il ne doit pas non plus passer
+         * inaperçu : la carte rejetterait la réponse et garderait son cache,
+         * sans que rien côté serveur n'explique pourquoi l'écran ne change
+         * plus.
+         */
+        $size = strlen((string) json_encode($answer, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        if ($size > self::MAX_PAYLOAD) {
+            log::add('glowscreen32', 'error', sprintf(
+                __('%1$s : la mise en page fait %2$s octets, au-delà des %3$s que la carte accepte. Elle la rejettera. Réduisez le nombre de boutons ou la longueur des libellés.', __FILE__),
+                $this->getHumanName(), $size, self::MAX_PAYLOAD));
+        }
+
+        return $answer;
+    }
+
+    /*
      * L'état de chaque bouton, dans l'ordre de la mise en page. Ajouté au
      * contrat en v1.2, et c'est le champ qui fait tout le travail de fraîcheur :
      * « version » ne bouge qu'aux changements de CONFIGURATION, si bien qu'une
@@ -570,12 +1159,46 @@ class glowscreen32 extends eqLogic {
      * multiplié par le nombre d'écrans — donc il ne construit ni libellés, ni
      * couleurs, ni identifiants : seulement les états.
      */
-    public function states() {
-        $states = array();
-        foreach ($this->activeButtons() as $button) {
+    public function states($_schema = self::SCHEMA_LEGACY) {
+        $states  = array();
+        $buttons = (((int) $_schema) >= self::SCHEMA_CURRENT)
+            ? $this->activeButtons()
+            : $this->legacyButtons();
+        foreach ($buttons as $button) {
             $states[] = self::buttonState($button);
         }
         return $states;
+    }
+
+    /*
+     * La réponse de « ping », dans le schéma négocié.
+     *
+     * Schéma 1 : trois champs, et « states » dans le même ordre que les
+     * « buttons » du layout de schéma 1 — donc l'aplatissement à six, sans les
+     * boutons « nav ».
+     *
+     * Schéma 2 : deux champs de plus, et « states » indexé par l'id GLOBAL. Si
+     * la taille du tableau ne correspond pas au nombre de boutons connus, le
+     * firmware ignore « states » et force un layout complet : c'est cette règle
+     * qui a rattrapé la v1.2, et elle est conservée telle quelle.
+     */
+    public function ping($_schema = self::SCHEMA_LEGACY) {
+        if (((int) $_schema) < self::SCHEMA_CURRENT) {
+            return array(
+                'ok'      => true,
+                'version' => $this->version(),
+                'time'    => time(),
+                'states'  => $this->states(self::SCHEMA_LEGACY),
+            );
+        }
+        return array(
+            'ok'       => true,
+            'version'  => $this->version(),
+            'time'     => time(),
+            'tzoffset' => self::tzOffset(),
+            'info'     => $this->infoText(),
+            'states'   => $this->states(self::SCHEMA_CURRENT),
+        );
     }
 
     /* ================================================================ APPUI */
@@ -594,16 +1217,55 @@ class glowscreen32 extends eqLogic {
      * c'est le plugin qui en déduit la commande — y compris son SENS, pour un
      * interrupteur.
      */
-    public function press($_rank) {
+    public function press($_rank, $_schema = self::SCHEMA_LEGACY) {
         if (!is_numeric($_rank)) {
             return null;
         }
-        $rank    = (int) $_rank;
-        $buttons = $this->activeButtons();
+        $rank = (int) $_rank;
+
+        /*
+         * ⚠ LE POINT DÉLICAT DU SCHÉMA 2.
+         *
+         * Le rang est résolu DANS LE MÊME APLATISSEMENT que celui qui a servi
+         * le « layout » à cette carte-là. Une carte de schéma 1 a reçu six
+         * boutons renumérotés 0 à 5, sans les « nav » ; son rang 2 désigne donc
+         * le troisième bouton de CETTE liste, et pas forcément le bouton d'id
+         * global 2. Les résoudre dans la mauvaise liste ferait jouer le bouton
+         * d'à côté — sur ce projet, « le bouton d'à côté » a déjà ouvert un
+         * portail.
+         *
+         * Le schéma vient de l'en-tête que la carte envoie, exactement comme
+         * pour « layout » : c'est la même négociation, sur la même requête, et
+         * il n'y a donc rien de nouveau à implémenter côté firmware — il suffit
+         * qu'il envoie l'en-tête sur TOUS ses appels, ce que le contrat prévoit.
+         *
+         * Le défaut est le schéma 1, et c'est volontaire : une carte v1.4, qui
+         * n'envoie aucun en-tête, doit continuer d'être comprise. Le risque est
+         * du bon côté — une carte v2 qui oublierait l'en-tête verrait ses six
+         * premiers boutons répondre juste et les autres rendre unknown_button,
+         * plutôt que de déclencher silencieusement la mauvaise commande.
+         */
+        $legacy  = (((int) $_schema) < self::SCHEMA_CURRENT);
+        $buttons = $legacy ? $this->legacyButtons() : $this->activeButtons();
+
         if ($rank < 0 || !isset($buttons[$rank])) {
             return null;
         }
         $button = $buttons[$rank];
+
+        /*
+         * Un « press » sur un bouton « nav » : la navigation est locale à la
+         * carte, elle n'émet jamais d'appui. En recevoir un signale un firmware
+         * en désaccord avec la configuration qu'il a reçue — contrat v2.0,
+         * unknown_button et une ligne de journal. Le cas ne peut pas se
+         * produire en schéma 1, où les « nav » sont exclus de l'aplatissement.
+         */
+        if ($button['mode'] === self::MODE_NAV) {
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : appui reçu sur le bouton %2$s, qui est un bouton de navigation — la carte exécute une mise en page différente de celle qui est configurée. Rien n\'est joué.', __FILE__),
+                $this->getHumanName(), $rank));
+            return null;
+        }
 
         /* Lu AVANT l'exécution : c'est cette valeur qui décide du sens en mode
          * interrupteur, et c'est d'elle que se déduit l'état attendu. */
@@ -793,6 +1455,24 @@ class glowscreen32 extends eqLogic {
      * action ne doit pas faire redessiner tous les écrans de la maison pour un
      * champ que plus personne ne lit.
      */
+    /*
+     * ⚠ LE PIÈGE. Cette méthode et buttonSignature() énumèrent leurs champs EN
+     * DUR. Tout champ de configuration qui change ce que la carte DESSINE doit
+     * donc y être ajouté explicitement, sans quoi « version » ne bouge pas —
+     * et aucun écran du parc ne se redessine après modification. Le symptôme
+     * est désolant : l'enregistrement réussit, le journal dit « configuration
+     * enregistrée », la page montre la nouvelle mise en page, et le mur affiche
+     * l'ancienne indéfiniment.
+     *
+     * Ajoutés en v2.0 : les pages (titre et parent), la grille, le balayage,
+     * l'horloge et la commande du bandeau — plus, au niveau du bouton, sa page,
+     * sa case et la page que vise un bouton « nav ».
+     *
+     * Ce qui n'y est PAS, et volontairement : le verrou OTA (il ne change rien
+     * à ce qui est affiché) et tout ce qui relève de l'ÉTAT des équipements —
+     * une lampe allumée ferait changer la signature sans qu'aucune
+     * configuration ait bougé, et « states » du ping est là pour ça.
+     */
     public function layoutSignature() {
         $buttons = array();
         foreach ($this->buttons() as $button) {
@@ -802,6 +1482,16 @@ class glowscreen32 extends eqLogic {
             'name'    => $this->getName(),
             'poll'    => $this->poll(),
             'buttons' => $buttons,
+            /* --- contrat v2.0 --- */
+            'pages'   => $this->pages(),
+            'grid'    => $this->grid(),
+            'swipe'   => $this->swipe(),
+            'clock'   => $this->clock(),
+            /* La RÉFÉRENCE de la commande du bandeau, pas sa valeur : la
+             * température change toutes les minutes, et faire redessiner
+             * l'écran à chaque degré serait absurde — « info » voyage dans le
+             * ping, comme « states ». */
+            'info'    => trim((string) $this->getConfiguration('info_cmd', '')),
         )));
     }
 
@@ -809,8 +1499,13 @@ class glowscreen32 extends eqLogic {
         $signature = array(
             $_button['label'], $_button['color'], $_button['icon'],
             $_button['mode'], $_button['state'],
+            /* Contrat v2.0 : déplacer un bouton d'une page ou d'une case à
+             * l'autre est un changement de mise en page comme un autre. */
+            $_button['page'], $_button['slot'],
         );
-        if ($_button['mode'] === self::MODE_TOGGLE) {
+        if ($_button['mode'] === self::MODE_NAV) {
+            $signature[] = $_button['nav'];
+        } elseif ($_button['mode'] === self::MODE_TOGGLE) {
             $signature[] = $_button['on'];
             $signature[] = $_button['off'];
             $signature[] = $_button['toggle'];
@@ -1476,11 +2171,44 @@ class glowscreen32 extends eqLogic {
          */
         $this->setConfiguration('ota_allowed', $this->otaAllowed() ? 1 : 0);
 
+        /*
+         * Les plafonds du contrat v2.0 sont REFUSÉS, pas tronqués — et ils le
+         * sont sur ce qui a été REÇU, avant que sanitizeButtons() n'ait coupé
+         * la liste. Enregistrer trente-quatre boutons en n'en gardant que
+         * trente-deux, sans un mot, c'est exactement la faute que la v1.4
+         * commettait côté firmware.
+         */
+        $raw = $this->getConfiguration('buttons', array());
+        if (is_array($raw) && count($raw) > self::MAX_BUTTONS) {
+            throw new Exception(sprintf(
+                __('Cet écran porte %1$s boutons : le maximum est %2$s. Au-delà, la mise en page ne tient plus dans la mémoire de la carte.', __FILE__),
+                count($raw), self::MAX_BUTTONS));
+        }
+
         $buttons = $this->buttons();
         /* Refusé AVANT l'écriture : un interrupteur sans état s'enregistrerait
          * sans rien dire et se découvrirait sur le mur, un appui sur deux. */
         self::checkButtons($buttons);
         $this->setConfiguration('buttons', $buttons);
+        /* Les pages, la grille et les deux cases à cocher, remis en forme une
+         * fois pour toutes : ce qui est relu ensuite est ce qui est écrit. */
+        $this->setConfiguration('pages', $this->pages());
+        $this->setConfiguration('grid', $this->grid());
+        $this->setConfiguration('swipe', $this->swipe() ? 1 : 0);
+        $this->setConfiguration('clock', $this->clock() ? 1 : 0);
+
+        /* Le nombre de boutons par page, contrôlé APRÈS la mise en forme —
+         * c'est elle qui décide de la page de chacun. */
+        $perPage = array();
+        foreach ($buttons as $button) {
+            $page = $button['page'];
+            $perPage[$page] = (isset($perPage[$page]) ? $perPage[$page] : 0) + 1;
+            if ($perPage[$page] > self::MAX_BUTTONS_PER_PAGE) {
+                throw new Exception(sprintf(
+                    __('La page %1$s porte plus de %2$s boutons : c\'est le maximum d\'une grille 4×3.', __FILE__),
+                    $page + 1, self::MAX_BUTTONS_PER_PAGE));
+            }
+        }
 
         /*
          * Le compteur de version. Incrémenté ici, avant l'écriture, pour ne pas
@@ -1514,6 +2242,25 @@ class glowscreen32 extends eqLogic {
      */
     public static function checkButtons($_buttons) {
         foreach ($_buttons as $index => $button) {
+            /*
+             * Un bouton de navigation qui ne vise rien, ou qui vise sa propre
+             * page : refusé à l'enregistrement. Sur le mur, il se présenterait
+             * comme un bouton ordinaire qui ne fait rien, et la première
+             * conclusion serait « l'écran ne répond plus ».
+             */
+            if ($button['mode'] === self::MODE_NAV) {
+                if ($button['nav'] < 0 || $button['nav'] >= self::MAX_PAGES) {
+                    throw new Exception(sprintf(
+                        __('%s : un bouton de navigation doit désigner la page qu\'il ouvre.', __FILE__),
+                        self::buttonWhere($index, $button)));
+                }
+                if ($button['nav'] === $button['page']) {
+                    throw new Exception(sprintf(
+                        __('%s : ce bouton de navigation ouvre la page sur laquelle il se trouve déjà. Il ne ferait rien.', __FILE__),
+                        self::buttonWhere($index, $button)));
+                }
+                continue;
+            }
             if ($button['mode'] !== self::MODE_TOGGLE || !self::buttonConfigured($button)) {
                 continue;
             }
@@ -1561,7 +2308,11 @@ class glowscreen32 extends eqLogic {
     /* « Bouton 1 « Facade » » — de quoi retrouver l'emplacement fautif dans un
      * formulaire de six lignes qui se ressemblent toutes. */
     public static function buttonWhere($_index, $_button) {
-        $where = sprintf(__('Bouton %s', __FILE__), $_index + 1);
+        /* La page et la case, et non plus le seul rang : avec quatre pages de
+         * douze, « Bouton 27 » ne désigne plus rien que l'utilisateur puisse
+         * retrouver dans le formulaire. */
+        $where = sprintf(__('Page %1$s, case %2$s', __FILE__),
+            $_button['page'] + 1, $_button['slot'] + 1);
         return ($_button['label'] !== '') ? $where . ' « ' . $_button['label'] . ' »' : $where;
     }
 
@@ -1571,7 +2322,11 @@ class glowscreen32 extends eqLogic {
 
         log::add('glowscreen32', 'info', sprintf(
             __('%1$s : configuration enregistrée, version %2$s, %3$s bouton(s) actif(s).', __FILE__),
-            $this->getHumanName(), $this->version(), count($this->layout()['buttons'])
+            /* Le nombre de boutons RÉELLEMENT envoyés, tous pages confondues,
+             * et non le contenu d'une réponse d'API : depuis la v2.0 il y a
+             * deux réponses possibles, et compter dans l'une des deux ferait
+             * dire au journal un chiffre qui dépend du schéma de l'appelant. */
+            $this->getHumanName(), $this->version(), count($this->activeButtons())
         ));
     }
 
@@ -1679,7 +2434,8 @@ class glowscreen32 extends eqLogic {
                 'enable'  => (int) $eqLogic->getIsEnable(),
                 'version' => $eqLogic->version(),
                 'poll'    => $eqLogic->poll(),
-                'buttons' => count($eqLogic->layout()['buttons']),
+                'buttons' => count($eqLogic->activeButtons()),
+                'pages'   => $eqLogic->pageCount(),
                 'contact' => $contact,
                 'human'   => self::humanContact($contact),
                 'age'     => $eqLogic->contactAge(),

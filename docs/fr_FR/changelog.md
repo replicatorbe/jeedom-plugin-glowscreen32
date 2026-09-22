@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.0
+
+Le schéma 2 du contrat d'API : des pages, une grille réglable, un bandeau — et
+**la négociation de schéma**, sans laquelle rien de tout cela ne pouvait être
+publié.
+
+- **Négociation de schéma.** La carte annonce ce qu'elle sait lire dans l'en-tête
+  `X-GLOWSCREEN32-SCHEMA`. Absent, vide ou `1` → **le schéma 1 à l'identique,
+  octet pour octet**. `2` ou plus → le schéma 2. Le plugin ne répond jamais
+  au-dessus de ce qui est annoncé.
+  C'est ce qui rend la mise à jour du parc possible : le plugin se déploie en une
+  seconde et d'un seul coup, alors que les écrans passent en OTA un par un, sur
+  plusieurs jours. Sans négociation, publier cette version rendait **tous** les
+  écrans inutilisables au même instant — et un écran qui n'affiche plus rien ne
+  peut plus recevoir l'OTA qui le réparerait. **Le plugin part toujours en
+  premier, le firmware ensuite.**
+- **Jusqu'à 32 boutons, sur 4 pages de 12.** Le tableau `buttons` de la
+  configuration reste **plat** : chaque bouton porte simplement sa `page` et sa
+  `slot`. Une configuration antérieure se lit donc telle quelle — un bouton sans
+  page ni case tombe sur la page d'accueil, à la case de son rang, c'est-à-dire
+  exactement là où il était. **Aucun script de migration à lancer.**
+- **Grille réglable** : 3×2, 3×3, 4×2 ou 4×3, **3×3 par défaut**. Réduire la
+  grille ne perd aucun bouton : ceux dont la case n'existe plus sont déplacés
+  vers la première case libre, et le journal le dit.
+- **Mode de bouton « navigation »** : le bouton ouvre une autre page. Il ne
+  commande rien, son état vaut toujours `null`, et **la carte y répond
+  elle-même, sans réseau** — un écran coupé de Jeedom continue de naviguer.
+- **Bandeau** : une commande d'information au choix, **formatée par le plugin**
+  (arrondie, avec son unité, seize caractères au plus), plus une horloge
+  facultative calée sur l'heure du serveur. Le décalage horaire est calculé
+  depuis le fuseau de Jeedom, **heure d'été comprise** — pas de valeur en dur.
+- **Vocabulaire d'icônes fermé.** `icon` devient une liste déroulante : le
+  firmware convertit le nom en identifiant numérique au parsing et ne sait
+  dessiner que ceux qu'il connaît. Un champ libre laissait configurer des icônes
+  qui ne s'afficheraient jamais.
+- **Aplatissement du schéma 1.** Un écran configuré avec des pages, interrogé
+  sans en-tête, renvoie ses **six premiers boutons**, **boutons de navigation
+  exclus**, renumérotés de 0 à 5. Et `press` résout le rang reçu **dans cet
+  aplatissement-là** : une carte de schéma 1 qui envoie le rang 2 désigne le
+  troisième bouton de *sa* liste, pas le bouton d'id global 2.
+- **Les dépassements sont journalisés, jamais absorbés en silence** : plus de 32
+  boutons ou plus de 12 par page sont refusés à l'enregistrement ; une page
+  pleine, un bouton déplacé ou une réponse au-delà de 8 192 octets laissent une
+  ligne de journal.
+- La signature de mise en page tient compte des pages, de la grille, du
+  balayage, de l'horloge, de la commande du bandeau, et de la page, de la case
+  et de la cible de navigation de chaque bouton. **Sans quoi `version` ne
+  bougerait pas, et aucun écran ne se redessinerait** — l'enregistrement
+  réussirait, la page montrerait la nouvelle mise en page, et le mur l'ancienne.
+- Les traductions anglaises, en retard depuis la 1.2, sont à jour.
+
 ## 1.2
 
 La mise à jour du firmware par le réseau (contrat d'API v1.4).

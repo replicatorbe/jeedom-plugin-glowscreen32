@@ -19,6 +19,20 @@ foreach (scenario::all() as $gsScenario) {
 sendVarToJS('glowscreen32Scenarios', $gsScenarios);
 sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 
+/* Le vocabulaire d'icônes du contrat v2.0, transmis depuis la CONSTANTE de la
+   classe : il est fermé, et la seule façon qu'il ne dérive pas est qu'il n'ait
+   qu'une source. Le jour où le firmware en apprend une nouvelle, on l'ajoute
+   dans glowscreen32::ICONS et la liste déroulante suit. */
+sendVarToJS('glowscreen32Icons', glowscreen32::ICONS);
+sendVarToJS('glowscreen32Limits', array(
+	'buttons'     => glowscreen32::MAX_BUTTONS,
+	'pages'       => glowscreen32::MAX_PAGES,
+	'perPage'     => glowscreen32::MAX_BUTTONS_PER_PAGE,
+	'legacy'      => glowscreen32::LEGACY_MAX_BUTTONS,
+	'defaultCols' => glowscreen32::DEFAULT_COLS,
+	'defaultRows' => glowscreen32::DEFAULT_ROWS,
+));
+
 /* L'état de l'OTA : le verrou global, le firmware déposé, le parc. Une seule
    lecture, réutilisée par le tableau du parc et par le cadre « Firmware ». */
 $gsOta = glowscreen32::otaState();
@@ -41,12 +55,18 @@ $gsFirmware = $gsOta['firmware'];
 		opacity: .7;
 	}
 
-	/* L'aperçu de l'écran : la grille 3x2 du contrat, à l'échelle, pour qu'on
-	   voie ce que la carte affichera avant d'aller le vérifier sur le mur. */
+	/* L'aperçu de l'écran, à l'échelle, pour qu'on voie ce que la carte
+	   affichera avant d'aller le vérifier sur le mur.
+
+	   La grille n'est PLUS figée en 3×2 : elle suit le réglage de l'onglet
+	   « Écran », par deux variables CSS que le JS repose à chaque rendu. Une
+	   grille d'aperçu qui ne correspond pas à celle de la carte est pire que
+	   pas d'aperçu du tout — elle fait placer les boutons au mauvais endroit
+	   en toute confiance. */
 	.glowscreen32Grid {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		grid-template-rows: repeat(2, 1fr);
+		grid-template-columns: repeat(var(--gs-cols, 3), 1fr);
+		grid-template-rows: repeat(var(--gs-rows, 3), 1fr);
 		gap: 6px;
 		width: 320px;
 		height: 240px;
@@ -93,6 +113,17 @@ $gsFirmware = $gsOta['firmware'];
 
 	/* La MAC sous le nom de la vignette : discrète, mais toujours là. Avec
 	   plusieurs écrans, c'est elle qui dit lequel est lequel. */
+	/* Une case dont la position sort de la grille choisie : le bouton est
+	   conservé, mais il sera déplacé vers la première case libre par le
+	   plugin. Le dire ici évite de le découvrir sur le mur. */
+	.glowscreen32SlotOut {
+		border-color: var(--al-warning-color, #b58900);
+	}
+
+	.glowscreen32PageTabs {
+		margin-bottom: 10px;
+	}
+
 	.glowscreen32CardMac {
 		display: block;
 		font-size: .8em;
@@ -167,6 +198,7 @@ $gsFirmware = $gsOta['firmware'];
 							<th style="width:230px;">{{Dernier contact}}</th>
 							<th style="width:120px;">{{Firmware}}</th>
 							<th style="width:150px;">{{Verrou OTA}}</th>
+							<th style="width:70px;">{{Pages}}</th>
 							<th style="width:80px;">{{Boutons}}</th>
 							<th style="width:80px;">{{Version}}</th>
 						</tr>
@@ -207,6 +239,7 @@ $gsFirmware = $gsOta['firmware'];
 										<span class="label label-default">{{fermé (global)}}</span>
 									<?php } ?>
 								</td>
+								<td><?php echo $gsScreen['pages']; ?></td>
 								<td><?php echo $gsScreen['buttons']; ?></td>
 								<td><?php echo $gsScreen['version']; ?></td>
 							</tr>
@@ -374,6 +407,54 @@ $gsFirmware = $gsOta['firmware'];
 						</fieldset>
 
 						<fieldset>
+							<legend><i class="fas fa-th"></i> {{Grille et bandeau}}</legend>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Grille}}</label>
+								<div class="col-sm-3">
+									<!-- Pas une .eqLogicAttr : la grille est un couple (colonnes, lignes) rangé
+									     dans configuration.grid, et il est recomposé à la main dans saveEqLogic(),
+									     exactement comme les boutons. -->
+									<select class="form-control" id="sel_glowscreen32Grid">
+										<option value="3x2">3 &times; 2 &mdash; 6 {{cases}}</option>
+										<option value="3x3">3 &times; 3 &mdash; 9 {{cases}}</option>
+										<option value="4x2">4 &times; 2 &mdash; 8 {{cases}}</option>
+										<option value="4x3">4 &times; 3 &mdash; 12 {{cases}}</option>
+									</select>
+								</div>
+								<div class="col-sm-6">
+									<span class="help-block" style="margin:0;">{{Le nombre de cases par page, sur l'écran 320×240. 3×3 par défaut. Une carte dont le firmware est antérieur à la v2 ne sait dessiner que 3×2, et ne recevra de toute façon que les six premiers boutons. Réduire la grille ne perd aucun bouton : ceux dont la case n'existe plus sont déplacés vers la première case libre, et le journal le dit.}}</span>
+								</div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Balayage}}</label>
+								<div class="col-sm-2">
+									<input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="swipe">
+								</div>
+								<label class="col-sm-2 control-label">{{Horloge}}</label>
+								<div class="col-sm-2">
+									<input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="clock">
+								</div>
+								<div class="col-sm-3">
+									<span class="help-block" style="margin:0;">{{Le balayage change de page d'un glissement de doigt ; fermé par défaut, car un balayage involontaire est vite arrivé sur du tactile résistif. L'horloge s'affiche au bandeau, à partir de l'heure du serveur : la carte n'utilise pas de NTP.}}</span>
+								</div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Bandeau}}</label>
+								<div class="col-sm-6">
+									<div class="input-group">
+										<input class="eqLogicAttr form-control roundedLeft" data-l1key="configuration" data-l2key="info_cmd" placeholder="{{Commande d'information à afficher}}">
+										<span class="input-group-btn">
+											<a class="btn btn-default roundedRight" id="bt_glowscreen32InfoPick" title="{{Choisir la commande du bandeau}}"><i class="fas fa-list-alt"></i></a>
+										</span>
+									</div>
+								</div>
+								<div class="col-sm-3">
+									<span class="help-block" style="margin:0;">{{Une température, une humidité, une puissance : la valeur est formatée ICI — arrondie, avec son unité, seize caractères au plus — et la carte ne fait que l'afficher. Elle voyage dans le « ping », elle ne fait donc pas redessiner l'écran à chaque degré.}}</span>
+								</div>
+							</div>
+						</fieldset>
+
+						<fieldset>
 							<legend><i class="fas fa-download"></i> {{Mise à jour par le réseau}}</legend>
 							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Verrou de cet écran}}</label>
@@ -453,10 +534,15 @@ $gsFirmware = $gsOta['firmware'];
 				<br>
 				<div class="col-lg-7">
 					<div class="alert alert-info" style="margin-bottom:10px;">
-						<b>{{Six boutons, dans l'ordre de l'écran.}}</b>
-						{{Chacun porte un libellé, une couleur, une icône, et un mode. En « Action simple », l'appui joue toujours la même commande — c'est ce qu'il faut pour un portail ou un scénario. En « Interrupteur », le plugin lit l'état et joue la commande inverse : un appui allume, le suivant éteint. Un bouton incomplet n'est pas envoyé à la carte — il ne laisse pas de case vide, les boutons suivants remontent.}}
+						<b>{{Jusqu'à quatre pages, douze boutons par page, trente-deux en tout.}}</b>
+						{{Chaque bouton porte un libellé, une couleur, une icône et un mode. En « Action simple », l'appui joue toujours la même commande — c'est ce qu'il faut pour un portail ou un scénario. En « Interrupteur », le plugin lit l'état et joue la commande inverse : un appui allume, le suivant éteint. En « Navigation », le bouton ouvre une autre page : il ne commande rien du tout, et la carte y répond elle-même, sans réseau.}}
+						<br><br>
+						<b>{{Une carte dont le firmware est antérieur à la v2}}</b>
+						{{ne reçoit que les six premiers boutons, boutons de navigation exclus, renumérotés de 0 à 5. Elle reste utilisable en mode dégradé plutôt que de recevoir une structure qu'elle ne comprend pas.}}
 					</div>
+					<ul class="nav nav-pills glowscreen32PageTabs" id="ul_glowscreen32Pages"></ul>
 					<form class="form-horizontal">
+						<div id="div_glowscreen32Page"></div>
 						<div id="div_glowscreen32Buttons"></div>
 					</form>
 				</div>
@@ -464,9 +550,9 @@ $gsFirmware = $gsOta['firmware'];
 					<fieldset>
 						<legend><i class="fas fa-desktop"></i> {{Aperçu}}</legend>
 						<div class="glowscreen32Grid" id="div_glowscreen32Preview"></div>
-						<span class="help-block">{{La grille 3×2 d'un écran 320×240, telle que la carte la dessinera. L'aperçu suit la saisie ; il ne dit rien de l'état des lampes, que seule la carte connaît.}}</span>
+						<span class="help-block">{{La page en cours d'édition, sur un écran 320×240, telle que la carte la dessinera : la grille suit le réglage de l'onglet « Écran ». L'aperçu suit la saisie ; il ne dit rien de l'état des lampes, que seule la carte connaît. L'identifiant sous chaque tuile est l'id GLOBAL du contrat v2, celui que la carte renvoie à « press » — il est continu sur tout l'écran, pages comprises.}}</span>
 						<a class="btn btn-default btn-sm" id="bt_glowscreen32Preview"><i class="fas fa-code"></i> {{Voir ce que la carte reçoit}}</a>
-						<pre id="pre_glowscreen32Payload" style="display:none;margin-top:10px;max-height:300px;overflow:auto;font-size:11px;"></pre>
+						<pre id="pre_glowscreen32Payload" style="display:none;margin-top:10px;max-height:400px;overflow:auto;font-size:11px;"></pre>
 					</fieldset>
 				</div>
 			</div>

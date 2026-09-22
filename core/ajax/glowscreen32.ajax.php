@@ -51,8 +51,19 @@ try {
      */
     if (init('action') == 'preview') {
         $eqLogic = $getScreen(init('id'));
+        /*
+         * LES DEUX SCHÉMAS, et pas seulement le nouveau.
+         *
+         * Le schéma 1 n'est pas une curiosité historique tant que le parc n'est
+         * pas entièrement passé en v2 : c'est ce que reçoivent les cartes qui
+         * n'ont pas encore été mises à jour. Le montrer ici est la seule façon
+         * de vérifier, sans décrocher un écran, que l'aplatissement à six
+         * boutons donne bien ce qu'on croit — et que l'« id » n'y désigne pas
+         * le même bouton que dans le schéma 2.
+         */
         ajax::success(array(
-            'layout' => $eqLogic->layout(),
+            'layout' => $eqLogic->layout(glowscreen32::SCHEMA_CURRENT),
+            'legacy' => $eqLogic->layout(glowscreen32::SCHEMA_LEGACY),
             'url'    => glowscreen32::apiInfo()['url'],
         ));
     }
