@@ -301,11 +301,28 @@ passer outre. La décision est entièrement côté serveur.
 2. Le plugin **refuse** un fichier qui ne commence pas par l'octet `0xE9` : ce
    n'est alors pas une image d'application ESP32, et la déposer reviendrait à
    promettre à une carte quelque chose qui l'empêcherait de redémarrer.
-3. La **version est lue dans le binaire**, dans le descripteur `esp_app_desc_t`
-   que l'outillage ESP-IDF y écrit. C'est la même que celle que la carte annonce
-   à `action=firmware` : comparer les deux a donc un sens, ce qui ne serait pas
-   le cas d'un numéro retapé à la main. À défaut de descripteur, le plugin lit
-   la version dans le nom du fichier.
+3. La **version est lue dans le binaire**, derrière le marqueur
+   `GLOWSCREEN32-FW:` que le firmware y grave lui-même, jusqu'au premier octet
+   nul. C'est la même chaîne que celle que la carte annonce à
+   `action=firmware` : comparer les deux a donc un sens, ce qui ne serait pas
+   le cas d'un numéro retapé à la main.
+
+   **Un binaire sans ce marqueur est refusé**, même s'il s'agit d'une image
+   ESP32 valide. C'est délibéré : sans version, il n'y a rien à comparer, et
+   publier quand même reviendrait soit à ne jamais déclencher de mise à jour,
+   soit à en déclencher une sur un binaire qui n'est pas le nôtre. L'outil de
+   calibration tactile, par exemple, ne porte pas de marqueur — il ne peut donc
+   pas partir en OTA, ce qui est exactement ce qu'on veut.
+
+   > **Pourquoi pas le descripteur ESP-IDF de l'image.** Elle en porte bien un
+   > (`esp_app_desc_t`, mot magique `0xABCD5432`), avec un champ « version », et
+   > la 1.2 le lisait. Sur un vrai binaire du projet il contient
+   > « esp-idf: v4.4.7 … » et « arduino-lib-builder » : il vient des
+   > bibliothèques Arduino **précompilées** du framework, pas de notre code, et
+   > il est donc identique dans tous nos binaires. Une version identique
+   > partout, c'est un OTA qui ne se déclenche jamais — et le défaut était
+   > silencieux, le dépôt réussissant et la version ayant l'air d'une version.
+   > D'où un marqueur à nous.
 4. Le **SHA-256 et la taille** sont calculés ici, sur le fichier réellement
    écrit, et jamais repris d'une saisie.
 5. Le binaire est rangé dans `data/firmware/` du plugin, sous le nom

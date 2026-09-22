@@ -107,28 +107,60 @@ class glowscreen32 extends eqLogic {
     const FIRMWARE_MAX_SIZE = 4194304;
 
     /*
-     * Les deux nombres magiques d'une image d'application ESP32.
-     *
-     * Le premier octet du fichier vaut 0xE9 : c'est l'en-tête d'image lu par
-     * le chargeur d'amorçage. Un fichier qui ne commence pas par là n'est pas
-     * un firmware, et le déposer reviendrait à promettre à la carte une image
-     * qu'elle écrirait dans sa partition inactive avant de ne plus démarrer.
-     *
-     * À l'offset 0x20 commence « esp_app_desc_t », dont le mot magique vaut
-     * 0xABCD5432 et dont le champ « version » occupe 32 octets — à l'offset
-     * 0x10 DANS le descripteur, soit 0x30 dans le fichier, derrière
-     * « secure_version » et deux mots réservés. Ne pas confondre avec
-     * « project_name », qui vient juste après et que l'on lirait à sa place si
-     * l'on comptait l'offset depuis le début du fichier.
-     * C'est là qu'on lit la version du firmware sans rien demander à personne :
-     * la version affichée par Jeedom est alors CELLE QUI EST DANS LE BINAIRE,
-     * et non celle qu'un opérateur a retapée dans un formulaire.
+     * Le premier octet d'une image d'application ESP32 vaut 0xE9 : c'est
+     * l'en-tête lu par le chargeur d'amorçage. Un fichier qui ne commence pas
+     * par là n'est pas un firmware, et le déposer reviendrait à promettre à la
+     * carte une image qu'elle écrirait dans sa partition inactive avant de ne
+     * plus démarrer. C'est la seule garantie qu'on ait sur la NATURE du
+     * fichier, et elle est conservée telle quelle.
      */
-    const ESP_IMAGE_MAGIC        = 0xE9;
-    const ESP_APP_DESC_MAGIC     = 0xABCD5432;
-    const ESP_APP_DESC_OFFSET    = 0x20;
-    const ESP_APP_VERSION_OFFSET = 0x10;
-    const ESP_APP_VERSION_LENGTH = 32;
+    const ESP_IMAGE_MAGIC = 0xE9;
+
+    /*
+     * Le marqueur de version gravé dans le binaire par notre firmware :
+     *
+     *     GLOWSCREEN32-FW:1.4.1\0
+     *
+     * ---------------------------------------------------------------------
+     * Pourquoi un marqueur à nous, et non le descripteur ESP-IDF de l'image.
+     *
+     * L'image porte bien un descripteur normalisé à l'offset 0x20 (mot magique
+     * 0xABCD5432), avec un champ « version ». La 1.2 le lisait. Vérification
+     * faite sur un VRAI binaire du projet, il contient :
+     *
+     *     version       « esp-idf: v4.4.7 38eeba213a »
+     *     project_name  « arduino-lib-builder »
+     *
+     * Ce descripteur vient des bibliothèques Arduino PRÉCOMPILÉES du
+     * framework, pas de notre code : avec « framework = arduino » sous
+     * PlatformIO, on ne le maîtrise pas. Il est donc IDENTIQUE dans tous nos
+     * binaires — et une version identique partout, c'est un OTA qui ne se
+     * déclenche jamais. Le défaut était silencieux : le dépôt réussissait, la
+     * version annoncée avait l'air d'une version, et aucun écran n'aurait
+     * jamais rien reçu.
+     *
+     * Le firmware grave donc sa propre chaîne (src/fw_version.cpp), protégée
+     * de l'élimination par le compilateur ET par l'éditeur de liens. Le plugin
+     * la cherche dans le fichier téléversé. La version reste ainsi CELLE QUI
+     * EST DANS LE BINAIRE, et c'est la même que celle que la carte annonce à
+     * « action=firmware » : comparer l'une à l'autre a un sens, ce qui ne
+     * serait pas le cas d'un numéro retapé dans un formulaire.
+     *
+     * Le préfixe est assez distinctif pour qu'aucun autre littéral ne puisse y
+     * ressembler par accident.
+     */
+    const FIRMWARE_MARKER = 'GLOWSCREEN32-FW:';
+
+    /*
+     * Longueur maximale de la version lue derrière le marqueur.
+     *
+     * Ce n'est pas une coquetterie : la valeur lue devient un NOM DE FICHIER et
+     * une URL. Elle vient d'un binaire quelconque — l'utilisateur peut déposer
+     * ce qu'il veut — et tout ce qui est accepté ici doit rester inoffensif une
+     * fois recollé dans un chemin. D'où une longueur bornée, un jeu de
+     * caractères fermé, et un terminateur nul exigé.
+     */
+    const FIRMWARE_VERSION_MAX = 31;
 
     /* ===================================================== ADRESSE MAC */
 
@@ -1047,44 +1079,76 @@ class glowscreen32 extends eqLogic {
          * parent. */
         $version = str_replace('..', '', $version);
         $version = ltrim($version, '.-');
-        return (strlen($version) > 32) ? substr($version, 0, 32) : $version;
+        return (strlen($version) > self::FIRMWARE_VERSION_MAX)
+            ? substr($version, 0, self::FIRMWARE_VERSION_MAX)
+            : $version;
     }
 
     /*
-     * La version lue DANS le binaire, ou une chaîne vide.
+     * La version lue DANS le binaire, derrière le marqueur, ou une chaîne vide.
      *
-     * esp_app_desc_t est écrit par l'outillage ESP-IDF à l'offset 0x20 de
-     * l'image : son mot magique la reconnaît à coup sûr, et son champ
-     * « version » est celui que la carte elle-même annonce à « action=firmware ».
-     * Les deux viennent donc de la même source, et comparer l'une à l'autre a
-     * un sens — ce qui ne serait pas le cas d'un numéro retapé à la main.
+     * Le fichier est parcouru par tranches plutôt que chargé d'un bloc : il
+     * pèse un mégaoctet aujourd'hui et le plafond du dépôt est à quatre, pour
+     * une requête PHP qui sert par ailleurs une page d'administration. Le
+     * recouvrement d'une tranche sur l'autre vaut exactement la longueur du
+     * motif recherché, si bien qu'un marqueur à cheval sur deux lectures est
+     * retrouvé au tour suivant.
+     *
+     * Ce qui suit le préfixe n'est accepté que si :
+     *
+     *   - un octet nul le termine dans la fenêtre — c'est ce qui distingue un
+     *     littéral C d'une suite d'octets qui ressemblerait au préfixe ;
+     *   - il ne contient que des chiffres, des lettres, un point, un tiret, un
+     *     souligné ou un plus ;
+     *   - il tient en 31 caractères.
+     *
+     * À défaut, la recherche CONTINUE à l'occurrence suivante plutôt que
+     * d'abandonner : un message de diagnostic du firmware pourrait citer le
+     * préfixe sans être le marqueur, et ce n'est pas une raison pour refuser un
+     * binaire qui porte le vrai.
      */
-    public static function imageVersion($_head) {
-        $head   = (string) $_head;
-        $needed = self::ESP_APP_DESC_OFFSET + self::ESP_APP_VERSION_OFFSET + self::ESP_APP_VERSION_LENGTH;
-        if (strlen($head) < $needed) {
-            return '';
-        }
-        $magic = unpack('V', substr($head, self::ESP_APP_DESC_OFFSET, 4));
-        if (!is_array($magic) || !isset($magic[1]) || $magic[1] != self::ESP_APP_DESC_MAGIC) {
-            return '';
-        }
-        $raw = substr($head, self::ESP_APP_DESC_OFFSET + self::ESP_APP_VERSION_OFFSET, self::ESP_APP_VERSION_LENGTH);
-        $end = strpos($raw, "\0");
-        if ($end !== false) {
-            $raw = substr($raw, 0, $end);
-        }
-        return self::sanitizeVersion($raw);
-    }
+    public static function markerVersion($_path) {
+        $prefix  = self::FIRMWARE_MARKER;
+        /* La valeur, plus l'octet nul qui doit la terminer. */
+        $window  = self::FIRMWARE_VERSION_MAX + 1;
+        $overlap = strlen($prefix) + $window;
 
-    /* Le dernier recours : la version lue dans le nom du fichier déposé,
-     * « glowscreen32-1.4.0.bin ». Un binaire compilé sans numéro de version
-     * reste déposable, plutôt que de renvoyer l'utilisateur à sa chaîne de
-     * compilation. */
-    public static function versionFromName($_name) {
-        if (preg_match('/([0-9]+(?:\.[0-9]+){1,3}[0-9A-Za-z._+-]*)/', (string) $_name, $matches)) {
-            return self::sanitizeVersion($matches[1]);
+        $handle = @fopen($_path, 'rb');
+        if ($handle === false) {
+            return '';
         }
+
+        $tail = '';
+        while (!feof($handle)) {
+            $read = fread($handle, 1048576);
+            if ($read === false || $read === '') {
+                break;
+            }
+            $buffer = $tail . $read;
+            $from   = 0;
+            while (($at = strpos($buffer, $prefix, $from)) !== false) {
+                $from  = $at + 1;
+                $start = $at + strlen($prefix);
+                if ($start + $window > strlen($buffer)) {
+                    /* La fenêtre déborde de ce qu'on a lu : l'occurrence sera
+                     * réexaminée au tour suivant, grâce au recouvrement. */
+                    break;
+                }
+                $value = substr($buffer, $start, $window);
+                $end   = strpos($value, "\0");
+                if ($end === false || $end === 0) {
+                    continue;
+                }
+                $value = substr($value, 0, $end);
+                if (preg_match('/^[0-9A-Za-z._+-]+$/', $value)) {
+                    fclose($handle);
+                    return self::sanitizeVersion($value);
+                }
+            }
+            $tail = substr($buffer, -$overlap);
+        }
+
+        fclose($handle);
         return '';
     }
 
@@ -1124,27 +1188,36 @@ class glowscreen32 extends eqLogic {
                 self::humanSize($size), self::humanSize(self::FIRMWARE_MAX_SIZE)));
         }
 
-        $head = @file_get_contents($_tmpPath, false, null, 0, 256);
+        /* L'octet d'en-tête : la seule garantie qu'on ait sur la nature du
+         * fichier, et elle est vérifiée avant tout le reste. */
+        $head = @file_get_contents($_tmpPath, false, null, 0, 4);
         if ($head === false || $head === '' || ord($head[0]) !== self::ESP_IMAGE_MAGIC) {
             throw new Exception(__('Ce fichier ne commence pas par l\'octet 0xE9 : ce n\'est pas une image d\'application ESP32. Déposer autre chose ferait écrire n\'importe quoi dans la partition inactive d\'une carte, qui ne redémarrerait plus.', __FILE__));
         }
 
-        /* La version du binaire fait foi ; la saisie de l'utilisateur ne sert
-         * que si l'image n'en porte pas. Un numéro retapé à la main qui
-         * contredirait le binaire ferait boucler la carte : elle annoncerait
-         * indéfiniment une version que le plugin croirait périmée. */
-        $version = self::imageVersion($head);
-        $source  = __('lue dans le binaire', __FILE__);
+        /*
+         * La version saisie explicitement prime — c'est une porte de sortie,
+         * pour un binaire produit autrement ou pour forcer un numéro le temps
+         * d'un essai. À défaut, elle est lue DANS le binaire, derrière le
+         * marqueur que le firmware y grave.
+         *
+         * Et s'il n'y a ni l'une ni l'autre, le dépôt est REFUSÉ. C'est
+         * délibéré : publier un firmware dont on ne sait pas nommer la version,
+         * c'est ou bien ne jamais déclencher l'OTA — une version identique
+         * partout ne fait jamais de différence — ou bien le déclencher sur un
+         * binaire qui n'est pas le nôtre. Mieux vaut un refus que l'un ou
+         * l'autre.
+         */
+        $version = self::sanitizeVersion($_version);
+        $source  = __('saisie à la main', __FILE__);
         if ($version === '') {
-            $version = self::sanitizeVersion($_version);
-            $source  = __('saisie à la main', __FILE__);
+            $version = self::markerVersion($_tmpPath);
+            $source  = __('lue dans le marqueur du binaire', __FILE__);
         }
         if ($version === '') {
-            $version = self::versionFromName($_name);
-            $source  = __('lue dans le nom du fichier', __FILE__);
-        }
-        if ($version === '') {
-            throw new Exception(__('Impossible de déterminer la version de ce firmware : l\'image ne porte pas de descripteur ESP-IDF, le nom du fichier n\'en contient pas, et aucune version n\'a été saisie. Sans version, rien ne permet de décider qu\'une carte est en retard.', __FILE__));
+            throw new Exception(sprintf(
+                __('Ce binaire ne porte pas de marqueur de version GlowScreen32 (« %s<version> », terminé par un octet nul) : il n\'a pas été produit par ce projet, ou la version n\'a pas été incrémentée. Sans version, rien ne permet de décider qu\'une carte est en retard — et une version identique d\'un binaire à l\'autre ne déclencherait jamais aucune mise à jour.', __FILE__),
+                self::FIRMWARE_MARKER));
         }
 
         $dir = self::firmwareDir(true);
@@ -1188,8 +1261,8 @@ class glowscreen32 extends eqLogic {
         }
 
         log::add('glowscreen32', 'info', sprintf(
-            __('OTA : firmware %1$s déposé (%2$s, sha256 %3$s, version %4$s). Verrou global : %5$s.', __FILE__),
-            $version, self::humanSize($size), $sha256, $source,
+            __('OTA : firmware %1$s déposé depuis « %2$s » (%3$s, sha256 %4$s, version %5$s). Verrou global : %6$s.', __FILE__),
+            $version, self::trimText($_name, 64), self::humanSize($size), $sha256, $source,
             self::otaEnabled() ? __('ouvert', __FILE__) : __('fermé — aucun écran ne le recevra', __FILE__)));
 
         return self::firmware();

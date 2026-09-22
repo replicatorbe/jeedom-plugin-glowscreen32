@@ -119,6 +119,47 @@ if (preg_match('/function otaDecision.*?\n    \}/s', $source, $methode)) {
     $echecs[] = 'otaDecision() est introuvable : la décision d\'OTA du contrat v1.4 n\'existe plus.';
 }
 
+/* --- La version ne doit PLUS venir du descripteur ESP-IDF ------------------
+ * Le descripteur normalisé de l'image (mot magique 0xABCD5432, offset 0x20)
+ * vient des bibliothèques Arduino PRÉCOMPILÉES du framework, pas de notre code :
+ * il annonce invariablement « esp-idf: v4.4.7 … » / « arduino-lib-builder ».
+ * Identique dans tous nos binaires, donc un OTA qui ne se déclenche JAMAIS —
+ * et le défaut est silencieux : le dépôt réussit, la version a l'air d'une
+ * version, et aucun écran ne reçoit rien. La version vient désormais d'un
+ * marqueur que le firmware grave lui-même. */
+foreach (array('ESP_APP_DESC_MAGIC', 'ESP_APP_DESC_OFFSET', 'ESP_APP_VERSION_OFFSET',
+               'ESP_APP_VERSION_LENGTH', 'imageVersion') as $disparu) {
+    if (strpos($source, $disparu) !== false) {
+        $echecs[] = $disparu . ' est de retour : la version serait de nouveau lue dans le '
+                  . 'descripteur ESP-IDF, identique dans tous nos binaires — l\'OTA ne se '
+                  . 'déclencherait jamais.';
+    }
+}
+foreach (array('FIRMWARE_MARKER', 'markerVersion') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : la version du firmware déposé ne se lit plus '
+                  . 'nulle part.';
+    }
+}
+if (strpos($source, "const FIRMWARE_MARKER = 'GLOWSCREEN32-FW:'") === false) {
+    $echecs[] = 'Le préfixe du marqueur n\'est plus « GLOWSCREEN32-FW: » : il est gravé dans '
+              . 'le binaire par src/fw_version.cpp, les deux côtés doivent dire la même chose.';
+}
+/* publishFirmware() doit effectivement s'en servir, et refuser à défaut :
+ * garder la méthode sans l'appeler laisserait passer n'importe quel binaire. */
+if (preg_match('/function publishFirmware.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'self::markerVersion(') === false) {
+        $echecs[] = 'publishFirmware() n\'appelle pas markerVersion() : la version ne vient '
+                  . 'plus du binaire.';
+    }
+    if (strpos($methode[0], 'ESP_IMAGE_MAGIC') === false) {
+        $echecs[] = 'publishFirmware() ne vérifie plus l\'octet 0xE9 : c\'est la seule '
+                  . 'garantie que le fichier déposé soit une image ESP32.';
+    }
+} else {
+    $echecs[] = 'publishFirmware() est introuvable : plus rien ne contrôle ce qui est déposé.';
+}
+
 /* --- Le firmware déposé doit survivre à un déploiement ---------------------
  * deploy-plugin.sh fait un rsync --delete : sans cette exclusion, le premier
  * redéploiement venu efface un binaire que le dépôt de développement ne

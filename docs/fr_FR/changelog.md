@@ -16,8 +16,14 @@ La mise à jour du firmware par le réseau (contrat d'API v1.4).
   faire la différence, donc pas passer outre.
 - **Dépôt du firmware depuis la page du plugin.** Un fichier qui ne commence pas
   par l'octet `0xE9` est refusé — ce n'est pas une image d'application ESP32. La
-  version est lue dans le descripteur ESP-IDF du binaire, le SHA-256 et la
-  taille sont calculés sur le fichier écrit.
+  version est lue dans le binaire, derrière le marqueur `GLOWSCREEN32-FW:` que
+  le firmware y grave ; le SHA-256 et la taille sont calculés sur le fichier
+  écrit. **Un binaire sans marqueur est refusé** : sans version, il n'y a rien à
+  comparer.
+  Le descripteur `esp_app_desc_t` de l'image ne convient pas — il vient des
+  bibliothèques Arduino précompilées du framework, annonce
+  « esp-idf: v4.4.7 … » dans tous nos binaires, et un OTA fondé dessus ne se
+  déclencherait donc jamais.
 - Le binaire est rangé dans `data/firmware/`, **exclu du déploiement** : un
   `deploy-plugin.sh` n'efface pas le firmware déposé. `data/firmware/.htaccess`
   rouvre les `.bin` que le `Deny from all` de `data/` interdirait à la carte.

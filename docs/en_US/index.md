@@ -135,9 +135,12 @@ up-to-date board gets: it cannot tell the difference, so it cannot work around
 it.
 
 Upload the `.bin` from the plugin page. The plugin refuses anything that does
-not start with byte `0xE9`, reads the version from the ESP-IDF application
-descriptor inside the image, computes the SHA-256 and the size itself, and
-stores the file under `data/firmware/`. That folder's binaries are excluded from
+not start with byte `0xE9`, reads the version from the `GLOWSCREEN32-FW:` marker
+the firmware burns into the image, computes the SHA-256 and the size itself, and
+stores the file under `data/firmware/`. A binary without that marker is
+**refused**: the image's own ESP-IDF descriptor comes from the precompiled
+Arduino libraries, is identical in every one of our builds, and would therefore
+never trigger an update at all. That folder's binaries are excluded from
 `deploy-plugin.sh`, so redeploying the plugin does not wipe the uploaded
 firmware, and `data/firmware/.htaccess` reopens `.bin` files so the board can
 actually download them.

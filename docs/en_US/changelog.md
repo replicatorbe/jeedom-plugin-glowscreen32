@@ -13,8 +13,11 @@ Over-the-air firmware updates (API contract v1.4).
   firmware dead. A blocked board gets exactly the answer an up-to-date board
   gets.
 - **Firmware upload from the plugin page.** A file not starting with byte
-  `0xE9` is refused. The version is read from the ESP-IDF application descriptor
-  inside the image; SHA-256 and size are computed on the written file.
+  `0xE9` is refused. The version is read from the `GLOWSCREEN32-FW:` marker the
+  firmware burns into the image; SHA-256 and size are computed on the written
+  file. A binary without the marker is refused — the image's own ESP-IDF
+  descriptor comes from the precompiled Arduino libraries and is identical in
+  every build, so an OTA based on it would never trigger.
 - The binary lives in `data/firmware/` and is **excluded from deployment**:
   redeploying the plugin does not wipe it. `data/firmware/.htaccess` reopens
   `.bin` files so the board can download them.
