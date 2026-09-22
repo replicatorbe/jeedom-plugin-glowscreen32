@@ -31,10 +31,20 @@ publié.
   (arrondie, avec son unité, seize caractères au plus), plus une horloge
   facultative calée sur l'heure du serveur. Le décalage horaire est calculé
   depuis le fuseau de Jeedom, **heure d'été comprise** — pas de valeur en dur.
-- **Vocabulaire d'icônes fermé.** `icon` devient une liste déroulante : le
-  firmware convertit le nom en identifiant numérique au parsing et ne sait
-  dessiner que ceux qu'il connaît. Un champ libre laissait configurer des icônes
-  qui ne s'afficheraient jamais.
+- **Vocabulaire d'icônes fermé, et une table d'alias.** `icon` devient une liste
+  déroulante : le firmware convertit le nom en identifiant numérique au parsing
+  et ne sait dessiner que ceux qu'il connaît. Un champ libre laissait configurer
+  des icônes qui ne s'afficheraient jamais. Un nom hors vocabulaire dont
+  l'intention est claire — `fire`, `volet`, `temperature` — est **résolu vers
+  son équivalent** plutôt que perdu ; ce qui n'est résolu par rien vaut `none`
+  **et laisse une ligne de journal nommant l'écran et le bouton**, pour qu'on
+  sache lequel corriger.
+- **En schéma 1, `icon` est un passe-plat : la chaîne stockée, telle quelle.**
+  Ni minuscules, ni alias, ni `none`, ni vide — exactement ce que faisait la
+  v1.4, où le champ était du texte libre. Le schéma 1 est un contrat figé, pas
+  un endroit où appliquer les règles du schéma 2 : c'est précisément à cela que
+  sert la négociation. La promesse « octet pour octet » devient ainsi vraie
+  **par construction, pour tous les écrans**, sans exception à retenir.
 - **Aplatissement du schéma 1.** Un écran configuré avec des pages, interrogé
   sans en-tête, renvoie ses **six premiers boutons**, **boutons de navigation
   exclus**, renumérotés de 0 à 5. Et `press` résout le rang reçu **dans cet

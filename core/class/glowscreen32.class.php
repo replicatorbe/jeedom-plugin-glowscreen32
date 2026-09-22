@@ -111,6 +111,45 @@ class glowscreen32 extends eqLogic {
         'folder', 'home', 'grid', 'car', 'mower', 'vacuum', 'bell', 'clock',
     );
 
+    /*
+     * Les alias — contrat v2.0.
+     *
+     * Un nom hors vocabulaire dont l'INTENTION est claire vaut son équivalent,
+     * plutôt que d'être perdu. Le parc contenait « fire » : fermer le
+     * vocabulaire sans cette table aurait fait disparaître l'icône d'un écran
+     * en service, silencieusement, à la première ouverture du formulaire.
+     *
+     * ⚠ Les alias ne valent QUE pour le schéma 2 et pour l'interface. Le schéma
+     * 1 ne les applique pas : il rend la chaîne stockée telle quelle (voir
+     * legacyIcon). C'est exactement à cela que sert la négociation de schéma —
+     * appliquer les règles de la v2 à une réponse v1 reviendrait à faire
+     * diverger un contrat figé.
+     *
+     * La table ne contient que des noms qui ne sont PAS déjà dans le
+     * vocabulaire : resolveIcon() consulte ICONS d'abord, un alias « lamp →
+     * lamp » ou « camera → camera » ne serait jamais lu. Un alias qui ne
+     * correspond à rien est du poids mort ; un alias manquant est une icône
+     * perdue.
+     */
+    const ICON_ALIASES = array(
+        'fire'        => 'heat',
+        'flame'       => 'heat',
+        'chauffage'   => 'heat',
+        'light'       => 'bulb',
+        'temp'        => 'thermo',
+        'temperature' => 'thermo',
+        'volet'       => 'shutter',
+        'store'       => 'blind',
+        'porte'       => 'door',
+        'portail'     => 'gate',
+        'prise'       => 'plug',
+        'clim'        => 'cool',
+        'ventilateur' => 'fan',
+        'musique'     => 'music',
+        'alarme'      => 'alarm',
+        'serrure'     => 'lock',
+    );
+
     /* Intervalle de rafraîchissement conseillé à la carte, en secondes. Le
      * « ping » qui l'utilise ne transfère que trois champs : une valeur basse
      * coûte peu, mais elle coûte quand même, une requête PHP à chaque appel. */
@@ -383,11 +422,16 @@ class glowscreen32 extends eqLogic {
             $buttons[] = array(
                 'label'    => self::trimText(isset($stored['label']) ? $stored['label'] : '', self::LABEL_MAX),
                 'color'    => self::normalizeColor(isset($stored['color']) ? $stored['color'] : ''),
-                /* Vocabulaire FERMÉ depuis la v2.0 : le firmware convertit le
-                 * nom en identifiant numérique au parsing, et ne sait donc
-                 * dessiner que ceux qu'il connaît. Jeedom ne doit pas pouvoir
-                 * en proposer d'autres. */
-                'icon'     => self::normalizeIcon(isset($stored['icon']) ? $stored['icon'] : ''),
+                /*
+                 * L'icône est stockée BRUTE, exactement comme en v1.
+                 *
+                 * La résolution vers le vocabulaire fermé a lieu à la
+                 * SÉRIALISATION du schéma 2, et nulle part ailleurs. Normaliser
+                 * ici réécrirait la configuration de l'utilisateur, et surtout
+                 * rendrait impossible de servir au schéma 1 ce qu'il a toujours
+                 * reçu : la chaîne telle qu'elle a été saisie.
+                 */
+                'icon'     => self::trimText(isset($stored['icon']) ? $stored['icon'] : '', 24),
                 'mode'     => $mode,
                 /* --- mise en page, contrat v2.0 --- */
                 'page'     => $page,
@@ -416,39 +460,49 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
-     * Un nom d'icône du vocabulaire fermé, ou « none ».
+     * Le nom d'icône résolu — SCHÉMA 2 et interface UNIQUEMENT.
      *
-     * Le champ vide vaut « none » : le contrat ne connaît pas d'autre façon de
-     * dire « pas d'icône », et le firmware v1.4 ne dessinait de toute façon
-     * aucune icône — la valeur y était de la donnée morte dans le blob NVS.
+     * Le vocabulaire d'abord, les alias ensuite, « none » à défaut. La casse
+     * est ignorée : le firmware convertit le nom en identifiant numérique au
+     * parsing, et « Bulb » désigne sans ambiguïté la même chose que « bulb ».
+     *
+     * Ce qui n'est résolu par RIEN vaut « none » — et l'appelant le journalise
+     * avec le nom de l'écran et le libellé du bouton, faute de quoi
+     * l'utilisateur verrait une tuile perdre son icône sans savoir laquelle
+     * corriger.
      */
-    public static function normalizeIcon($_icon) {
+    public static function resolveIcon($_icon) {
         $icon = strtolower(trim((string) $_icon));
-        return in_array($icon, self::ICONS, true) ? $icon : self::ICON_NONE;
+        if (in_array($icon, self::ICONS, true)) {
+            return $icon;
+        }
+        return isset(self::ICON_ALIASES[$icon]) ? self::ICON_ALIASES[$icon] : self::ICON_NONE;
     }
 
     /*
-     * La même icône, telle que le SCHÉMA 1 l'a toujours écrite.
+     * L'icône telle que le SCHÉMA 1 l'a toujours écrite : un PASSE-PLAT.
      *
-     * En v1, « pas d'icône » s'écrivait par une chaîne vide, le champ étant du
-     * texte libre. Le vocabulaire fermé de la v2.0 lui donne un nom, « none » —
-     * mais c'est une représentation INTERNE, et la sérialisation du schéma 1 ne
-     * doit pas en porter la trace : le contrat promet le schéma 1 « à
-     * l'identique, octet pour octet », et une exception non écrite est
-     * exactement ce qui coûte trois heures de dépannage six mois plus tard.
+     * La chaîne stockée, sans normalisation, sans minuscules, sans alias, sans
+     * « none » et sans vide. C'est exactement ce que faisait la v1.4, où
+     * « icon » était du texte libre que le firmware parsait sans jamais le
+     * dessiner.
      *
-     * Deux effets concrets, mineurs mais réels, si on l'oubliait : le champ
-     * entre dans le blob NVS d'une carte v1.4 — donc une écriture flash pour
-     * rien — et il entre dans la signature de mise en page, donc un redessin de
-     * tout le parc pour un champ que personne ne dessine.
+     * ⚠ Ce n'est pas une paresse, c'est la règle : le schéma 1 est un CONTRAT
+     * FIGÉ, pas un endroit où appliquer les règles du schéma 2. C'est
+     * précisément ce à quoi sert la négociation de schéma — chaque schéma
+     * répond selon ses propres règles, et celui d'hier ne change jamais. La
+     * promesse « octet pour octet » devient ainsi vraie PAR CONSTRUCTION, pour
+     * tous les écrans, sans exception ni cas particulier à retenir : « fire »
+     * ressort « fire », « Bulb » ressort « Bulb ».
      *
-     * C'est pour cette seconde raison que buttonSignature() passe par ici elle
-     * aussi : la conversion est bijective sur les valeurs stockées, elle ne
-     * perd donc rien, et elle laisse la signature d'une configuration v1
-     * exactement là où elle était.
+     * La fonction existe pour porter ce commentaire, et pour que le contrôle de
+     * tests/check-classes.php ait quelque chose à vérifier. buttonSignature()
+     * passe par elle aussi : c'est la valeur STOCKÉE qui entre dans la
+     * signature, donc la signature d'une configuration existante ne bouge pas,
+     * et le parc ne se redessine pas pour un champ que personne ne dessine.
      */
     public static function legacyIcon($_icon) {
-        return ($_icon === self::ICON_NONE) ? '' : (string) $_icon;
+        return (string) $_icon;
     }
 
     /* ============================================================ PAGES */
@@ -1102,6 +1156,20 @@ class glowscreen32 extends eqLogic {
             $state    = self::buttonState($button);
             $states[] = $state;
 
+            /*
+             * L'icône n'est résolue QU'ICI : vocabulaire, alias, puis « none ».
+             * Ce qui n'est résolu par rien laisse une ligne de journal qui
+             * nomme l'écran ET le bouton — sans elle, l'utilisateur verrait une
+             * tuile perdre son icône sans savoir laquelle corriger.
+             */
+            $icon = self::resolveIcon($button['icon']);
+            if ($icon === self::ICON_NONE && trim((string) $button['icon']) !== ''
+                && strtolower(trim((string) $button['icon'])) !== self::ICON_NONE) {
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('%1$s : l\'icône « %2$s » du bouton « %3$s » n\'existe pas et n\'a pas d\'équivalent connu ; la tuile s\'affichera sans icône. Choisissez-en une dans la liste.', __FILE__),
+                    $this->getHumanName(), $button['icon'], $this->buttonLabel($button)));
+            }
+
             $entry = array(
                 /* L'id GLOBAL à l'écran entier — contrat v2.0. Opaque pour la
                  * carte, qui le renvoie tel quel à « press ». « page » et
@@ -1110,7 +1178,7 @@ class glowscreen32 extends eqLogic {
                 'slot'  => $button['slot'],
                 'label' => $this->buttonLabel($button),
                 'color' => $button['color'],
-                'icon'  => $button['icon'],
+                'icon'  => $icon,
                 'mode'  => $button['mode'],
             );
             if ($button['mode'] === self::MODE_NAV) {

@@ -60,7 +60,8 @@
         "La page %1$s porte plus de %2$s boutons : c'est le maximum d'une grille 4×3.": "Page %1$s carries more than %2$s buttons: that is the maximum of a 4×3 grid.",
         "Mise en page tronquée : plus de %s boutons enregistrés, les suivants sont ignorés.": "Layout truncated: more than %s buttons stored, the rest are ignored.",
         "Page %1$s, case %2$s": "Page %1$s, slot %2$s",
-        "Page %s": "Page %s"
+        "Page %s": "Page %s",
+        "%1$s : l'icône « %2$s » du bouton « %3$s » n'existe pas et n'a pas d'équivalent connu ; la tuile s'affichera sans icône. Choisissez-en une dans la liste.": "%1$s: icon \"%2$s\" of button \"%3$s\" does not exist and has no known equivalent; the tile will show without an icon. Pick one from the list."
     },
     "plugins/glowscreen32/core/php/api.php": {
         "API : %1$s (HTTP %2$s) depuis %3$s%4$s": "API: %1$s (HTTP %2$s) from %3$s%4$s",

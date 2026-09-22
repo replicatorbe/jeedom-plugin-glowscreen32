@@ -30,6 +30,14 @@ var GLOWSCREEN32_ICONS = (typeof glowscreen32Icons !== 'undefined')
   ? glowscreen32Icons
   : ['none']
 
+/* Les alias du contrat v2.0. Ils valent ici comme en schéma 2, et NON en
+   schéma 1 : un nom hors vocabulaire dont l'intention est claire est résolu
+   plutôt que perdu. Sans eux, ouvrir le formulaire d'un écran qui porte
+   « fire » suffirait à lui faire perdre son icône au premier enregistrement. */
+var GLOWSCREEN32_ICON_ALIASES = (typeof glowscreen32IconAliases !== 'undefined')
+  ? glowscreen32IconAliases
+  : {}
+
 var GLOWSCREEN32_DEFAULT_COLOR = '#2d7ff9'
 
 /*
@@ -196,10 +204,13 @@ function glowscreen32PageButtons(_page) {
   return list
 }
 
-/* Le nom d'icône, ramené au vocabulaire fermé. */
+/* Le nom d'icône, résolu comme le fera le schéma 2 : le vocabulaire d'abord,
+   les alias ensuite, « none » à défaut. La casse est ignorée. */
 function glowscreen32Icon(_icon) {
   var icon = String(init(_icon, '')).trim().toLowerCase()
-  return (GLOWSCREEN32_ICONS.indexOf(icon) >= 0) ? icon : 'none'
+  if (GLOWSCREEN32_ICONS.indexOf(icon) >= 0) { return icon }
+  if (isset(GLOWSCREEN32_ICON_ALIASES[icon])) { return GLOWSCREEN32_ICON_ALIASES[icon] }
+  return 'none'
 }
 
 /* ============================================================== BOUTONS */

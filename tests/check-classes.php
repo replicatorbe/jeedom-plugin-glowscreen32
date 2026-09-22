@@ -197,7 +197,7 @@ if (!file_exists($htFirmware)) {
  * réparerait. */
 foreach (array('SCHEMA_LEGACY', 'SCHEMA_CURRENT', 'MODE_NAV', 'MAX_PAGES',
                'MAX_BUTTONS_PER_PAGE', 'LEGACY_MAX_BUTTONS', 'legacyButtons',
-               'layoutLegacy', 'layoutV2', 'tzOffset', 'infoText', 'normalizeIcon') as $attendu) {
+               'layoutLegacy', 'layoutV2', 'tzOffset', 'infoText', 'resolveIcon', 'legacyIcon') as $attendu) {
     if (strpos($source, $attendu) === false) {
         $echecs[] = $attendu . ' est absent : le schéma 2 du contrat v2.0 n\'est plus mis '
                   . 'en oeuvre.';
@@ -256,21 +256,52 @@ if (preg_match('/function buttonSignature.*?\n    \}/s', $source, $methode)) {
  * carte v1.4 et redessiner tout le parc pour un champ que le firmware v1.4 ne
  * dessine nulle part. */
 if (strpos($source, 'function legacyIcon') === false) {
-    $echecs[] = 'legacyIcon() est absent : le schéma 1 renverrait « none » là où il a '
-              . 'toujours renvoyé une chaîne vide, et le contrat promet le schéma 1 à '
-              . 'l\'identique, octet pour octet.';
+    $echecs[] = 'legacyIcon() est absent : plus rien ne marque l\'endroit où le schéma 1 '
+              . 'doit rendre l\'icône telle qu\'elle est stockée.';
 }
 if (preg_match('/function layoutLegacy.*?\n    \}/s', $source, $methode)) {
     if (strpos($methode[0], 'self::legacyIcon(') === false) {
         $echecs[] = 'layoutLegacy() ne repasse pas l\'icône par legacyIcon() : le schéma 1 '
                   . 'a dérivé.';
     }
+    /* LE contrôle : le schéma 1 ne normalise RIEN. Ni minuscules, ni alias, ni
+     * « none ». C'est un contrat figé, pas un endroit où appliquer les règles
+     * du schéma 2 — et c'est ce qui rend « octet pour octet » vrai par
+     * construction, pour tous les écrans, sans exception à retenir. */
+    foreach (array('resolveIcon', 'strtolower', 'ICON_NONE', 'ICON_ALIASES') as $interdit) {
+        if (strpos($methode[0], $interdit) !== false) {
+            $echecs[] = 'layoutLegacy() applique ' . $interdit . ' à la réponse du schéma 1 : '
+                      . 'ce schéma est figé, il rend ce qui est stocké, tel quel. Normaliser '
+                      . 'ici réécrit un contrat que des cartes en service lisent déjà.';
+        }
+    }
+}
+if (preg_match('/function legacyIcon.*?\n    \}/s', $source, $methode)) {
+    foreach (array('resolveIcon', 'strtolower', 'ICON_NONE', 'ICON_ALIASES', 'in_array') as $interdit) {
+        if (strpos($methode[0], $interdit) !== false) {
+            $echecs[] = 'legacyIcon() n\'est plus un passe-plat (' . $interdit . ' y apparaît) : '
+                      . 'le schéma 1 ne rend plus la chaîne stockée telle quelle.';
+        }
+    }
 }
 if (preg_match('/function buttonSignature.*?\n    \}/s', $source, $methode)) {
     if (strpos($methode[0], 'self::legacyIcon(') === false) {
-        $echecs[] = 'buttonSignature() ne repasse pas l\'icône par legacyIcon() : une '
-                  . 'configuration dont l\'icône était vide changerait de signature, et tout '
-                  . 'le parc se redessinerait pour rien.';
+        $echecs[] = 'buttonSignature() ne repasse pas l\'icône par legacyIcon() : la '
+                  . 'signature ne porterait plus sur la valeur STOCKÉE, et une configuration '
+                  . 'existante ferait redessiner tout le parc pour rien.';
+    }
+}
+/* Les alias sont la contrepartie du vocabulaire fermé : sans eux, fermer le
+ * vocabulaire fait disparaître en silence l'icône d'un écran en service. */
+if (strpos($source, 'const ICON_ALIASES') === false) {
+    $echecs[] = 'ICON_ALIASES est absent : un nom hors vocabulaire dont l\'intention est '
+              . 'claire serait perdu au lieu d\'être résolu.';
+}
+if (preg_match('/function layoutV2.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'self::resolveIcon(') === false) {
+        $echecs[] = 'layoutV2() ne résout plus l\'icône : les alias ne serviraient à rien, '
+                  . 'et un nom hors vocabulaire partirait tel quel vers un firmware qui ne '
+                  . 'sait pas le dessiner.';
     }
 }
 

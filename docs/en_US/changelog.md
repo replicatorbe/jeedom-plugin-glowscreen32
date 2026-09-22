@@ -30,9 +30,19 @@ negotiation**, without which none of it could have been published.
   (rounded, with its unit, sixteen characters at most), plus an optional clock
   based on server time. The time offset is computed from Jeedom's timezone,
   **daylight saving included** — no hard-coded value.
-- **Closed icon vocabulary.** `icon` becomes a drop-down list: the firmware
-  turns the name into a numeric id at parse time and can only draw the ones it
-  knows. A free-text field allowed icons to be configured that would never show.
+- **Closed icon vocabulary, plus an alias table.** `icon` becomes a drop-down
+  list: the firmware turns the name into a numeric id at parse time and can only
+  draw the ones it knows. A free-text field allowed icons to be configured that
+  would never show. A name outside the vocabulary whose intent is clear —
+  `fire`, `volet`, `temperature` — is **resolved to its equivalent** rather than
+  lost; anything resolved by nothing becomes `none` **and leaves a log line
+  naming the screen and the button**, so one knows which to fix.
+- **In schema 1, `icon` is a pass-through: the stored string, as is.** No
+  lowercasing, no aliases, no `none`, no empty — exactly what v1.4 did, where
+  the field was free text. Schema 1 is a frozen contract, not a place to apply
+  schema 2's rules: that is precisely what negotiation is for. The "byte for
+  byte" promise thus becomes true **by construction, for every screen**, with no
+  exception to remember.
 - **Schema 1 flattening.** A screen configured with pages, queried without the
   header, returns its **first six buttons**, **navigation buttons excluded**,
   renumbered 0 to 5. And `press` resolves the rank received **in that very

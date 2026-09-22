@@ -24,6 +24,10 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
    qu'une source. Le jour où le firmware en apprend une nouvelle, on l'ajoute
    dans glowscreen32::ICONS et la liste déroulante suit. */
 sendVarToJS('glowscreen32Icons', glowscreen32::ICONS);
+/* Les alias, transmis eux aussi depuis la classe : la liste déroulante doit
+   résoudre « fire » vers « heat » comme le fera le schéma 2, sinon ouvrir le
+   formulaire suffirait à faire perdre son icône à un écran en service. */
+sendVarToJS('glowscreen32IconAliases', glowscreen32::ICON_ALIASES);
 sendVarToJS('glowscreen32Limits', array(
 	'buttons'     => glowscreen32::MAX_BUTTONS,
 	'pages'       => glowscreen32::MAX_PAGES,
