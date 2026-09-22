@@ -427,6 +427,30 @@ class glowscreen32 extends eqLogic {
         return in_array($icon, self::ICONS, true) ? $icon : self::ICON_NONE;
     }
 
+    /*
+     * La même icône, telle que le SCHÉMA 1 l'a toujours écrite.
+     *
+     * En v1, « pas d'icône » s'écrivait par une chaîne vide, le champ étant du
+     * texte libre. Le vocabulaire fermé de la v2.0 lui donne un nom, « none » —
+     * mais c'est une représentation INTERNE, et la sérialisation du schéma 1 ne
+     * doit pas en porter la trace : le contrat promet le schéma 1 « à
+     * l'identique, octet pour octet », et une exception non écrite est
+     * exactement ce qui coûte trois heures de dépannage six mois plus tard.
+     *
+     * Deux effets concrets, mineurs mais réels, si on l'oubliait : le champ
+     * entre dans le blob NVS d'une carte v1.4 — donc une écriture flash pour
+     * rien — et il entre dans la signature de mise en page, donc un redessin de
+     * tout le parc pour un champ que personne ne dessine.
+     *
+     * C'est pour cette seconde raison que buttonSignature() passe par ici elle
+     * aussi : la conversion est bijective sur les valeurs stockées, elle ne
+     * perd donc rien, et elle laisse la signature d'une configuration v1
+     * exactement là où elle était.
+     */
+    public static function legacyIcon($_icon) {
+        return ($_icon === self::ICON_NONE) ? '' : (string) $_icon;
+    }
+
     /* ============================================================ PAGES */
 
     /*
@@ -1033,7 +1057,9 @@ class glowscreen32 extends eqLogic {
                 'id'    => $rank,
                 'label' => $this->buttonLabel($button),
                 'color' => $button['color'],
-                'icon'  => $button['icon'],
+                /* La forme v1 : « none » est une représentation interne au
+                 * plugin, elle n'a jamais voyagé sur le fil en schéma 1. */
+                'icon'  => self::legacyIcon($button['icon']),
                 'mode'  => $button['mode'],
                 'state' => self::buttonState($button),
             );
@@ -1497,7 +1523,10 @@ class glowscreen32 extends eqLogic {
 
     public static function buttonSignature($_button) {
         $signature = array(
-            $_button['label'], $_button['color'], $_button['icon'],
+            /* L'icône dans sa forme v1 : une configuration dont l'icône était
+             * vide garde ainsi exactement la signature qu'elle avait, et ne
+             * fait donc pas redessiner un parc qui afficherait la même chose. */
+            $_button['label'], $_button['color'], self::legacyIcon($_button['icon']),
             $_button['mode'], $_button['state'],
             /* Contrat v2.0 : déplacer un bouton d'une page ou d'une case à
              * l'autre est un changement de mise en page comme un autre. */

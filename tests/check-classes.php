@@ -249,6 +249,31 @@ if (preg_match('/function buttonSignature.*?\n    \}/s', $source, $methode)) {
     $echecs[] = 'buttonSignature() est introuvable.';
 }
 
+/* --- Le schéma 1 doit rester IDENTIQUE, octet pour octet ------------------
+ * « none » est la représentation interne du vocabulaire fermé de la v2.0 ; en
+ * schéma 1, l'absence d'icône s'écrit par une chaîne vide, comme elle l'a
+ * toujours fait. Sérialiser « none » à la place ferait écrire la flash d'une
+ * carte v1.4 et redessiner tout le parc pour un champ que le firmware v1.4 ne
+ * dessine nulle part. */
+if (strpos($source, 'function legacyIcon') === false) {
+    $echecs[] = 'legacyIcon() est absent : le schéma 1 renverrait « none » là où il a '
+              . 'toujours renvoyé une chaîne vide, et le contrat promet le schéma 1 à '
+              . 'l\'identique, octet pour octet.';
+}
+if (preg_match('/function layoutLegacy.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'self::legacyIcon(') === false) {
+        $echecs[] = 'layoutLegacy() ne repasse pas l\'icône par legacyIcon() : le schéma 1 '
+                  . 'a dérivé.';
+    }
+}
+if (preg_match('/function buttonSignature.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'self::legacyIcon(') === false) {
+        $echecs[] = 'buttonSignature() ne repasse pas l\'icône par legacyIcon() : une '
+                  . 'configuration dont l\'icône était vide changerait de signature, et tout '
+                  . 'le parc se redessinerait pour rien.';
+    }
+}
+
 /* --- L'aplatissement du schéma 1 ------------------------------------------
  * Les boutons « nav » doivent en être exclus : une carte v1.4 ne connaît que
  * « action » et « toggle », et dessinerait une tuile qui, à l'appui, recevrait
