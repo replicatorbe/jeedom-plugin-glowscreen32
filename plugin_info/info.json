@@ -1,0 +1,35 @@
+{
+    "id": "glowscreen32",
+    "name": "GlowScreen32",
+    "pluginVersion": "1.0",
+    "description": {
+        "fr_FR": "Pilote des écrans tactiles ESP32 depuis Jeedom. Un équipement représente un écran physique, reconnu à son adresse MAC, et porte jusqu'à six boutons : un libellé, une couleur, une icône, et la commande d'action ou le scénario que l'appui déclenche. La carte récupère sa mise en page par un point d'entrée HTTP protégé par la clé API du plugin, signale ses appuis, et ne redessine son écran que lorsque le compteur de version change.",
+        "en_US": "Drives ESP32 touch screens from Jeedom. One device stands for one physical screen, identified by its MAC address, and carries up to six buttons: a label, a colour, an icon, and the action command or scenario the press triggers. The board fetches its layout from an HTTP endpoint protected by the plugin API key, reports presses, and only redraws its screen when the version counter changes."
+    },
+    "licence": "AGPL",
+    "author": "sMug (Jérôme Fafchamps)",
+    "require": "4.4",
+    "requireOsVersion": "11",
+    "category": "organization",
+    "index": "glowscreen32",
+    "display": "glowscreen32",
+    "hasDependency": 0,
+    "hasOwnDeamon": 0,
+    "maxDependancyInstallTime": 5,
+    "eventjs": 0,
+    "issue": "https://github.com/replicatorbe/jeedom-plugin-glowscreen32/issues",
+    "documentation": "https://github.com/replicatorbe/jeedom-plugin-glowscreen32/blob/master/docs/#language#/index.md",
+    "documentation_beta": "https://github.com/replicatorbe/jeedom-plugin-glowscreen32/blob/beta/docs/#language#/index.md",
+    "changelog": "https://github.com/replicatorbe/jeedom-plugin-glowscreen32/blob/master/docs/#language#/changelog.md",
+    "changelog_beta": "https://github.com/replicatorbe/jeedom-plugin-glowscreen32/blob/beta/docs/#language#/changelog.md",
+    "language": [
+        "fr_FR",
+        "en_US"
+    ],
+    "compatibility": [
+        "smart",
+        "rpi",
+        "docker",
+        "diy"
+    ]
+}
