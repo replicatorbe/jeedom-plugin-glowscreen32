@@ -25,12 +25,20 @@ require_once __DIR__ . '/../../../../core/php/core.inc.php';
  *     séparateur et recopiée dans le logicalId pour que la recherche soit un
  *     index et non un parcours ;
  *   - sa mise en page est une liste d'au plus six boutons rangés dans la
- *     configuration, chacun visant une commande d'action ou un scénario ;
+ *     configuration, chacun visant une commande d'action, un scénario, ou un
+ *     couple allumer/éteindre choisi d'après l'état ;
  *   - un compteur de version dit à la carte qu'elle doit redessiner.
  *
  * Le contrat d'API (docs/fr_FR/index.md) est figé : ce qui est produit ici pour
  * « layout », « press » et « ping » ne change pas sans le décider là-bas
  * d'abord, le firmware étant écrit en face.
+ *
+ * ⚠ Depuis le contrat v1.3, le champ « id » d'un bouton est son RANG dans la
+ * mise en page (0 à 5) et non un identifiant de commande Jeedom. La carte ne
+ * désigne donc plus ce qu'il faut exécuter : c'est le plugin qui le décide, à
+ * partir de la configuration du bouton et de son état courant. Une carte
+ * compromise ne peut plus déclencher que les boutons de son propre écran, et
+ * seulement dans le sens que le plugin juge pertinent.
  */
 class glowscreen32 extends eqLogic {
 
@@ -49,10 +57,36 @@ class glowscreen32 extends eqLogic {
      * du contrat, pour qu'un écran non peint reste cohérent avec la maquette. */
     const DEFAULT_COLOR = '#2D7FF9';
 
-    /* Les deux formes d'action qu'un bouton sait déclencher. */
+    /*
+     * Les deux modes de bouton du contrat v1.3.
+     *
+     * MODE_ACTION  — une commande d'action, ou un scénario, joué tel quel à
+     *                chaque appui. C'est ce qu'il faut pour un relais
+     *                impulsionnel (un portail), pour un scénario, pour tout ce
+     *                qui n'a pas de sens « allumé / éteint ».
+     * MODE_TOGGLE  — un interrupteur : le plugin lit l'état courant et joue la
+     *                commande INVERSE. C'est la correction du défaut constaté
+     *                en v1.2, où un bouton lié à la seule commande « Allumer »
+     *                allumait, et n'éteignait jamais.
+     */
+    const MODE_ACTION = 'action';
+    const MODE_TOGGLE = 'toggle';
+
+    /* Les deux formes d'action qu'un bouton en mode « action » sait déclencher. */
     const TARGET_NONE     = '';
     const TARGET_CMD      = 'cmd';
     const TARGET_SCENARIO = 'scenario';
+
+    /*
+     * Granularité d'horodatage du dernier contact, en secondes.
+     *
+     * Une carte appelle « ping » toutes les 30 s ; avec dix écrans, horodater
+     * chaque appel ferait six cents écritures par heure pour une information
+     * dont personne ne lit la seconde. À la minute, l'écriture est au pire une
+     * par écran et par minute, et « cet écran ne répond plus » reste une
+     * question à laquelle on répond exactement de la même façon.
+     */
+    const CONTACT_GRANULARITY = 60;
 
     /* ===================================================== ADRESSE MAC */
 
@@ -113,7 +147,7 @@ class glowscreen32 extends eqLogic {
     /*
      * Les boutons enregistrés, remis en forme.
      *
-     * Rendus tels qu'ils sont stockés — la résolution de la cible n'a lieu que
+     * Rendus tels qu'ils sont stockés — la résolution des cibles n'a lieu que
      * dans layout(), qui touche la base. La page de configuration comme l'API
      * passent par ici, si bien qu'elles voient exactement la même liste.
      */
@@ -127,12 +161,16 @@ class glowscreen32 extends eqLogic {
 
     /*
      * Remet une liste de boutons dans la forme attendue : au plus six entrées,
-     * chacune avec ses cinq clés, jamais absentes.
+     * chacune avec toutes ses clés, jamais absentes.
      *
      * Les valeurs viennent d'un formulaire, donc du réseau. Une couleur est
      * recopiée dans du JSON que la carte lit sans se méfier, et un libellé est
      * affiché tel quel : les deux sont bornés ici, une fois, plutôt qu'à chaque
      * endroit qui s'en sert.
+     *
+     * Un bouton enregistré avant la v1.3 n'a pas de clé « mode » : il vaut
+     * « action », ce qui est exactement ce qu'il faisait. Aucune configuration
+     * existante ne change de comportement à la mise à jour.
      */
     public static function sanitizeButtons($_buttons) {
         $buttons = array();
@@ -142,6 +180,11 @@ class glowscreen32 extends eqLogic {
             }
             if (!is_array($stored)) {
                 continue;
+            }
+
+            $mode = isset($stored['mode']) ? (string) $stored['mode'] : self::MODE_ACTION;
+            if ($mode !== self::MODE_TOGGLE) {
+                $mode = self::MODE_ACTION;
             }
 
             $target = isset($stored['target']) ? (string) $stored['target'] : self::TARGET_NONE;
@@ -156,15 +199,30 @@ class glowscreen32 extends eqLogic {
                  * qu'il sait dessiner, le plugin n'a pas à tenir sa liste et à
                  * refuser un nom qu'une version plus récente comprendrait. */
                 'icon'     => self::trimText(isset($stored['icon']) ? $stored['icon'] : '', 24),
+                'mode'     => $mode,
+                /* --- mode « action » --- */
                 'target'   => $target,
-                'cmd'      => isset($stored['cmd']) ? trim((string) $stored['cmd']) : '',
+                'cmd'      => self::trimCmd($stored, 'cmd'),
                 'scenario' => isset($stored['scenario']) ? (int) $stored['scenario'] : 0,
+                /* --- mode « toggle » --- */
+                'on'       => self::trimCmd($stored, 'on'),
+                'off'      => self::trimCmd($stored, 'off'),
+                /* La commande « Basculer » de l'équipement, quand il en a une.
+                 * Elle n'est qu'un secours : voir pressToggle(). */
+                'toggle'   => self::trimCmd($stored, 'toggle'),
+                /* --- commun --- */
                 /* La commande d'information qui dit si le bouton est allumé.
-                 * Désignée explicitement par l'utilisateur, et facultative. */
-                'state'    => isset($stored['state']) ? trim((string) $stored['state']) : '',
+                 * Facultative en mode « action », OBLIGATOIRE en mode
+                 * « toggle » : sans elle, rien ne décide du sens. */
+                'state'    => self::trimCmd($stored, 'state'),
             );
         }
         return $buttons;
+    }
+
+    /* Un champ de désignation de commande, tel qu'il sort du formulaire. */
+    public static function trimCmd($_stored, $_key) {
+        return isset($_stored[$_key]) ? trim((string) $_stored[$_key]) : '';
     }
 
     /* Un texte de formulaire, sans balise ni débordement. */
@@ -191,7 +249,7 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
-     * La commande d'action visée par un bouton, ou null.
+     * La commande d'action désignée par l'un des champs d'un bouton, ou null.
      *
      * Le coeur convertit lui-même le champ entre « #[Objet][Équipement]
      * [Commande]# » à l'affichage et « #id# » à l'enregistrement
@@ -200,21 +258,33 @@ class glowscreen32 extends eqLogic {
      * les deux. Elle lève, en revanche, sur une commande supprimée — ce qui
      * arrive pour de bon, et ne doit pas emporter toute la mise en page.
      */
-    public static function buttonCmd($_button) {
-        if ($_button['target'] !== self::TARGET_CMD || $_button['cmd'] === '') {
+    public static function actionCmd($_button, $_slot) {
+        $value = isset($_button[$_slot]) ? trim((string) $_button[$_slot]) : '';
+        if ($value === '') {
             return null;
         }
         try {
-            $cmd = cmd::byString($_button['cmd']);
+            $cmd = cmd::byString($value);
         } catch (Throwable $e) {
             return null;
         }
         return (is_object($cmd) && $cmd->getType() == 'action') ? $cmd : null;
     }
 
-    /* Le scénario visé par un bouton, ou null. */
+    /* La commande d'action d'un bouton en mode « action », ou null. */
+    public static function buttonCmd($_button) {
+        if ($_button['mode'] !== self::MODE_ACTION || $_button['target'] !== self::TARGET_CMD) {
+            return null;
+        }
+        return self::actionCmd($_button, 'cmd');
+    }
+
+    /* Le scénario visé par un bouton en mode « action », ou null. */
     public static function buttonScenario($_button) {
-        if ($_button['target'] !== self::TARGET_SCENARIO || $_button['scenario'] <= 0) {
+        if ($_button['mode'] !== self::MODE_ACTION || $_button['target'] !== self::TARGET_SCENARIO) {
+            return null;
+        }
+        if ($_button['scenario'] <= 0) {
             return null;
         }
         $scenario = scenario::byId($_button['scenario']);
@@ -222,24 +292,25 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
-     * L'identifiant qu'un bouton porte dans le contrat.
+     * La commande qui REPRÉSENTE le bouton : celle dont on reprend le nom quand
+     * l'utilisateur n'a pas donné de libellé, et celle dont on lit le champ
+     * « valeur » pour deviner l'état quand il ne l'a pas désigné.
      *
-     * Pour une commande, c'est son id Jeedom, exactement ce que le contrat
-     * demande. Le contrat ne prévoit rien pour un scénario : on lui donne
-     * l'opposé de son id, qui ne peut entrer en collision avec aucun id de
-     * commande et reste un entier JSON que le firmware lit sans traitement
-     * particulier. Le sens du signe est documenté, et « press » sait le relire.
+     * Pour un interrupteur, c'est « Allumer » : sur un Shelly, « Allumer »,
+     * « Éteindre » et « Basculer » pointent toutes la même commande d'état, mais
+     * « Allumer » est celle dont le nom décrit le mieux ce que le bouton fait.
      */
-    public static function buttonId($_button) {
-        $cmd = self::buttonCmd($_button);
-        if ($cmd !== null) {
-            return (int) $cmd->getId();
+    public static function buttonMainCmd($_button) {
+        if ($_button['mode'] === self::MODE_TOGGLE) {
+            foreach (array('on', 'toggle', 'off') as $slot) {
+                $cmd = self::actionCmd($_button, $slot);
+                if ($cmd !== null) {
+                    return $cmd;
+                }
+            }
+            return null;
         }
-        $scenario = self::buttonScenario($_button);
-        if ($scenario !== null) {
-            return -((int) $scenario->getId());
-        }
-        return 0;
+        return self::buttonCmd($_button);
     }
 
     /*
@@ -276,7 +347,7 @@ class glowscreen32 extends eqLogic {
             return null;
         }
 
-        $cmd = self::buttonCmd($_button);
+        $cmd = self::buttonMainCmd($_button);
         if ($cmd === null) {
             return null;
         }
@@ -308,10 +379,49 @@ class glowscreen32 extends eqLogic {
         return ($value == 1) ? 1 : 0;
     }
 
+    /*
+     * L'utilisateur a-t-il mis quelque chose dans cet emplacement ?
+     *
+     * Distingue l'emplacement laissé vide — il n'y a rien à signaler — du
+     * bouton renseigné mais cassé, qui mérite une ligne de journal.
+     */
+    public static function buttonConfigured($_button) {
+        if ($_button['mode'] === self::MODE_TOGGLE) {
+            return $_button['on'] !== '' || $_button['off'] !== ''
+                || $_button['toggle'] !== '' || $_button['state'] !== '';
+        }
+        return $_button['target'] !== self::TARGET_NONE;
+    }
+
+    /*
+     * Ce bouton est-il jouable ici et maintenant ?
+     *
+     * Un interrupteur exige les DEUX : son état, sans lequel il n'y a aucun
+     * moyen de décider du sens, et au moins une commande à jouer. Il vaut mieux
+     * qu'il disparaisse de l'écran qu'il ne s'y affiche en n'allumant jamais
+     * qu'à moitié.
+     */
+    public static function buttonResolves($_button) {
+        if ($_button['mode'] === self::MODE_TOGGLE) {
+            return self::buttonStateCmd($_button) !== null
+                && self::buttonMainCmd($_button) !== null;
+        }
+        return self::buttonCmd($_button) !== null || self::buttonScenario($_button) !== null;
+    }
+
     /* ========================================================== MISE EN PAGE */
 
     /*
-     * La réponse de « action=layout », telle que la carte la reçoit.
+     * Les boutons réellement envoyés à la carte, dans l'ordre de l'écran.
+     *
+     * L'index dans CE tableau est l'identifiant du contrat v1.3 : le rang du
+     * bouton, de 0 à 5. « layout », « ping » et « press » passent tous les
+     * trois par ici, et c'est ce qui garantit à la fois que le tableau
+     * « states » du ping est dans le même ordre que les « buttons » du layout,
+     * et que le rang reçu par « press » désigne le même bouton que celui que la
+     * carte a dessiné. Trois parcours séparés, même filtrés de la même façon,
+     * finiraient un jour par diverger, et le symptôme serait un appui sur la
+     * lampe qui ouvrirait le portail.
      *
      * Les boutons sans cible sont retirés : une case vide dans le formulaire
      * est un bouton que l'utilisateur n'a pas voulu, l'écran ne doit pas
@@ -319,22 +429,13 @@ class glowscreen32 extends eqLogic {
      * disparaître son bouton de la même façon, et le journal le dit — sinon
      * l'utilisateur voit un écran qui perd un bouton sans explication.
      */
-    /*
-     * Les boutons réellement envoyés à la carte, dans l'ordre de l'écran.
-     *
-     * « layout » et « ping » passent tous les deux par ici, et c'est ce qui
-     * garantit que le tableau « states » du ping est dans le même ordre que les
-     * « buttons » du layout — exigence du contrat v1.2. Deux parcours séparés,
-     * même filtrés de la même façon, finiraient un jour par diverger, et le
-     * symptôme serait des pastilles décalées d'un cran sur le mur.
-     */
     public function activeButtons() {
         $active = array();
         foreach ($this->buttons() as $index => $button) {
-            if (self::buttonId($button) === 0) {
-                if ($button['target'] !== self::TARGET_NONE) {
+            if (!self::buttonResolves($button)) {
+                if (self::buttonConfigured($button)) {
                     log::add('glowscreen32', 'warning', sprintf(
-                        __('%1$s : le bouton %2$s vise une commande ou un scénario introuvable, il n\'est pas envoyé à l\'écran.', __FILE__),
+                        __('%1$s : le bouton %2$s est incomplet ou vise une cible introuvable, il n\'est pas envoyé à l\'écran.', __FILE__),
                         $this->getHumanName(), $index + 1
                     ));
                 }
@@ -347,12 +448,12 @@ class glowscreen32 extends eqLogic {
 
     public function layout() {
         $buttons = array();
-        foreach ($this->activeButtons() as $button) {
+        foreach ($this->activeButtons() as $rank => $button) {
             $label = $button['label'];
             if ($label === '') {
                 /* Un bouton sans libellé vaut mieux que pas de bouton : on
                  * reprend le nom de ce qu'il déclenche, qui est au moins exact. */
-                $cmd = self::buttonCmd($button);
+                $cmd = self::buttonMainCmd($button);
                 if ($cmd !== null) {
                     $label = self::trimText($cmd->getName(), 24);
                 } else {
@@ -362,10 +463,13 @@ class glowscreen32 extends eqLogic {
             }
 
             $buttons[] = array(
-                'id'    => self::buttonId($button),
+                /* Le RANG, pas un identifiant de commande — contrat v1.3. La
+                 * carte le traite comme opaque et le renvoie tel quel. */
+                'id'    => $rank,
                 'label' => $label,
                 'color' => $button['color'],
                 'icon'  => $button['icon'],
+                'mode'  => $button['mode'],
                 'state' => self::buttonState($button),
             );
         }
@@ -400,56 +504,189 @@ class glowscreen32 extends eqLogic {
         return $states;
     }
 
-    /*
-     * Joue le bouton portant cet identifiant, et rend son état après coup.
-     *
-     * L'identifiant est cherché parmi les boutons de CET écran, jamais dans
-     * toute la base : sans ce filtre, la clé API d'un écran du couloir
-     * commanderait n'importe quelle commande d'action de l'installation, porte
-     * de garage comprise. Un id qui n'est pas au tableau vaut « unknown_button ».
-     */
-    public function press($_id) {
-        $id = (int) $_id;
-        foreach ($this->buttons() as $button) {
-            if (self::buttonId($button) !== $id || $id === 0) {
-                continue;
-            }
+    /* ================================================================ APPUI */
 
+    /*
+     * Joue le bouton de ce RANG, et rend ce que le contrat v1.3 attend :
+     * l'identifiant reçu, l'état ATTENDU après exécution, et « pending ».
+     *
+     * Le rang est cherché dans la mise en page de CET écran-là, jamais dans
+     * toute la base : la clé API est la même pour tout le parc, et un rang qui
+     * ne désigne rien sur cet écran vaut « unknown_button » (null ici).
+     *
+     * C'est le changement structurant de la v1.3 : jusqu'en v1.2 la carte
+     * envoyait un identifiant de commande Jeedom, c'est-à-dire qu'elle décidait
+     * de ce qui devait s'exécuter. Elle envoie désormais un rang opaque, et
+     * c'est le plugin qui en déduit la commande — y compris son SENS, pour un
+     * interrupteur.
+     */
+    public function press($_rank) {
+        if (!is_numeric($_rank)) {
+            return null;
+        }
+        $rank    = (int) $_rank;
+        $buttons = $this->activeButtons();
+        if ($rank < 0 || !isset($buttons[$rank])) {
+            return null;
+        }
+        $button = $buttons[$rank];
+
+        /* Lu AVANT l'exécution : c'est cette valeur qui décide du sens en mode
+         * interrupteur, et c'est d'elle que se déduit l'état attendu. */
+        $before = self::buttonState($button);
+
+        if ($button['mode'] === self::MODE_TOGGLE) {
+            list($cmd, $expected, $what) = $this->pressToggle($button, $before, $rank);
+            if ($cmd === null) {
+                return null;
+            }
+        } else {
             $scenario = self::buttonScenario($button);
             if ($scenario !== null) {
-                /* Les mêmes étiquettes que le coeur pose lui-même quand un
-                 * scénario en démarre un autre : elles s'affichent dans le
-                 * journal du scénario, seul endroit où l'on pourra voir qu'il
-                 * a été lancé depuis un écran et non à la main. */
-                $scenario->addTag('trigger', 'glowscreen32');
-                $scenario->addTag('trigger_message', __('Lancé depuis l\'écran', __FILE__) . ' ' . $this->getHumanName());
-                /* launch() rend false sur un scénario désactivé, sans rien dire
-                 * à personne : l'appui resterait sans effet et sans trace. */
-                if ($scenario->launch() === false) {
-                    log::add('glowscreen32', 'warning', sprintf(
-                        __('%1$s : le scénario « %2$s » n\'a pas démarré (scénario désactivé ?).', __FILE__),
-                        $this->getHumanName(), $scenario->getName()
-                    ));
-                }
-                $this->noteContact($button['label'] !== '' ? $button['label'] : $scenario->getName());
-                /* Un scénario n'a pas d'état par lui-même, mais l'utilisateur a
-                 * pu en désigner un — une commande d'information qui dit si le
-                 * mode cinéma est en cours, par exemple. buttonState() le rend
-                 * s'il existe, et null sinon, ce qui est le cas courant. */
-                return array('ok' => true, 'id' => $id, 'state' => self::buttonState($button));
+                return $this->pressScenario($button, $scenario, $rank, $before);
             }
-
             $cmd = self::buttonCmd($button);
             if ($cmd === null) {
                 return null;
             }
+            /* En mode action le plugin n'a rien à prédire : il ne sait pas ce
+             * que la commande va faire de l'état, et souvent elle n'en a pas.
+             * Il rend donc ce qu'il LIT après coup. */
+            $expected = null;
+            $what     = $cmd->getName();
             $cmd->execCmd();
-            $this->noteContact($button['label'] !== '' ? $button['label'] : $cmd->getName());
-
-            return array('ok' => true, 'id' => $id, 'state' => self::buttonState($button));
         }
-        return null;
+
+        $label = ($button['label'] !== '') ? $button['label'] : $what;
+        $this->noteContact($label);
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : appui sur le bouton %2$s « %3$s » → %4$s.', __FILE__),
+            $this->getHumanName(), $rank, $label, $what
+        ));
+
+        return self::pressResult($rank, $button, $expected);
     }
+
+    /*
+     * Le sens d'un appui sur un interrupteur : quelle commande, et quel état en
+     * attendre.
+     *
+     * Le choix explicite d'après l'état est le comportement par défaut, et non
+     * la commande « Basculer » de l'équipement quand elle existe : une commande
+     * « Basculer » désynchronisée — un relais actionné à la main pendant que
+     * Jeedom ne regardait pas — inverse l'état que l'utilisateur voit sur
+     * l'écran, et l'écart ne se rattrape jamais. « Allumer » quand c'est éteint
+     * converge, lui, quoi qu'il se soit passé entre-temps.
+     *
+     * La commande « Basculer » sert donc de secours, dans deux cas seulement :
+     * l'état est illisible, ou l'utilisateur n'a rempli qu'une des deux
+     * commandes.
+     */
+    private function pressToggle($_button, $_before, $_rank) {
+        if ($_before === 1) {
+            $cmd = self::actionCmd($_button, 'off');
+            if ($cmd !== null) {
+                $cmd->execCmd();
+                return array($cmd, 0, $cmd->getName());
+            }
+        } elseif ($_before === 0) {
+            $cmd = self::actionCmd($_button, 'on');
+            if ($cmd !== null) {
+                $cmd->execCmd();
+                return array($cmd, 1, $cmd->getName());
+            }
+        }
+
+        $cmd = self::actionCmd($_button, 'toggle');
+        if ($cmd !== null) {
+            if ($_before === null) {
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('%1$s : état du bouton %2$s illisible, la commande « Basculer » est jouée à l\'aveugle.', __FILE__),
+                    $this->getHumanName(), $_rank
+                ));
+            }
+            $cmd->execCmd();
+            /* Sans état lu, il n'y a rien à prédire : le contrat prévoit null,
+             * et le « ping » suivant dira la vérité. */
+            $expected = ($_before === null) ? null : (($_before === 1) ? 0 : 1);
+            return array($cmd, $expected, $cmd->getName());
+        }
+
+        /* Dernier recours : l'état est illisible, ou l'utilisateur n'a rempli
+         * qu'une des deux commandes, et l'équipement n'a pas de « Basculer ».
+         * Allumer est le moindre mal — un appui sur un bouton qu'on croit
+         * éteint veut dire « allume », et l'appui suivant éteindra puisque
+         * l'état sera alors connu. */
+        foreach (array('on' => 1, 'off' => 0) as $slot => $expected) {
+            $cmd = self::actionCmd($_button, $slot);
+            if ($cmd === null) {
+                continue;
+            }
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : le bouton %2$s ne peut pas choisir son sens (état illisible ou commande manquante), « %3$s » est jouée.', __FILE__),
+                $this->getHumanName(), $_rank, $cmd->getName()
+            ));
+            $cmd->execCmd();
+            return array($cmd, $expected, $cmd->getName());
+        }
+
+        return array(null, null, '');
+    }
+
+    /* Un bouton-scénario : le contrat ne lui connaît pas d'état, mais
+     * l'utilisateur a pu en désigner un — une commande d'information qui dit si
+     * le mode cinéma est en cours, par exemple. */
+    private function pressScenario($_button, $_scenario, $_rank, $_before) {
+        /* Les mêmes étiquettes que le coeur pose lui-même quand un scénario en
+         * démarre un autre : elles s'affichent dans le journal du scénario,
+         * seul endroit où l'on pourra voir qu'il a été lancé depuis un écran et
+         * non à la main. */
+        $_scenario->addTag('trigger', 'glowscreen32');
+        $_scenario->addTag('trigger_message', __('Lancé depuis l\'écran', __FILE__) . ' ' . $this->getHumanName());
+        /* launch() rend false sur un scénario désactivé, sans rien dire à
+         * personne : l'appui resterait sans effet et sans trace. */
+        if ($_scenario->launch() === false) {
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : le scénario « %2$s » n\'a pas démarré (scénario désactivé ?).', __FILE__),
+                $this->getHumanName(), $_scenario->getName()
+            ));
+        }
+        $label = ($_button['label'] !== '') ? $_button['label'] : $_scenario->getName();
+        $this->noteContact($label);
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : appui sur le bouton %2$s « %3$s » → %4$s.', __FILE__),
+            $this->getHumanName(), $_rank, $label, $_scenario->getName()
+        ));
+        return self::pressResult($_rank, $_button, null);
+    }
+
+    /*
+     * La réponse de « press », contrat v1.3.
+     *
+     * « state » est l'état ATTENDU, et « pending » dit qu'il n'est pas confirmé.
+     * Sur du matériel réel, l'état remonte après un aller-retour avec
+     * l'équipement : au moment où l'on répond, le relais vient de basculer mais
+     * Jeedom n'a pas encore reçu la nouvelle valeur. Le firmware s'en sert pour
+     * un retour visuel optimiste immédiat ; la source de vérité reste le
+     * tableau « states » du ping suivant.
+     *
+     * La règle est unique pour les deux modes : on relit l'état, et « pending »
+     * vaut vrai tant que ce qu'on rend n'est pas ce qu'on lit. En mode action
+     * il n'y a pas de prédiction — l'état rendu EST l'état lu — donc « pending »
+     * y vaut toujours faux, et faux aussi pour un bouton sans état du tout.
+     */
+    public static function pressResult($_rank, $_button, $_expected) {
+        $after = self::buttonState($_button);
+        $state = ($_expected === null) ? $after : $_expected;
+        return array(
+            'ok'      => true,
+            'id'      => $_rank,
+            'state'   => $state,
+            'pending' => ($state !== null && $state !== $after),
+        );
+    }
+
+    /* ==================================================== ÉTAT DE L'ÉQUIPEMENT */
 
     /* Le compteur que la carte surveille. Jamais nul : une carte qui a mis en
      * cache la version 0 et relit 0 ne redessinerait jamais. */
@@ -476,24 +713,155 @@ class glowscreen32 extends eqLogic {
      * produit : résoudre chaque commande à l'enregistrement coûterait autant de
      * requêtes qu'il y a de boutons, et l'état d'une lampe changerait la
      * signature sans qu'aucune configuration ait bougé.
+     *
+     * Seuls les champs qui COMPTENT POUR LE MODE du bouton entrent dans le
+     * calcul : une commande « Éteindre » choisie puis le bouton repassé en mode
+     * action ne doit pas faire redessiner tous les écrans de la maison pour un
+     * champ que plus personne ne lit.
      */
     public function layoutSignature() {
+        $buttons = array();
+        foreach ($this->buttons() as $button) {
+            $buttons[] = self::buttonSignature($button);
+        }
         return md5(json_encode(array(
             'name'    => $this->getName(),
             'poll'    => $this->poll(),
-            'buttons' => $this->buttons(),
+            'buttons' => $buttons,
         )));
     }
 
-    /* Horodate le dernier échange avec la carte, et retient ce qu'elle a fait.
-     * Écrit des commandes, jamais l'équipement : un « ping » toutes les trente
-     * secondes qui sauverait l'eqLogic réécrirait la base sans raison. */
+    public static function buttonSignature($_button) {
+        $signature = array(
+            $_button['label'], $_button['color'], $_button['icon'],
+            $_button['mode'], $_button['state'],
+        );
+        if ($_button['mode'] === self::MODE_TOGGLE) {
+            $signature[] = $_button['on'];
+            $signature[] = $_button['off'];
+            $signature[] = $_button['toggle'];
+        } else {
+            $signature[] = $_button['target'];
+            $signature[] = $_button['cmd'];
+            $signature[] = $_button['scenario'];
+        }
+        return $signature;
+    }
+
+    /*
+     * L'horodatage du dernier appel reçu de la carte, ou une chaîne vide.
+     *
+     * Il vit dans la CONFIGURATION de l'équipement, et non dans la seule
+     * commande d'information : c'est là que le reste du plugin — la page, le
+     * tableau du parc, un futur contrôle de présence — va le chercher, et c'est
+     * ce que « getConfiguration('lastcontact') » doit rendre.
+     *
+     * Le repli sur la commande couvre les écrans horodatés par les versions
+     * précédentes, qui ne l'écrivaient que là.
+     */
+    public function lastContact() {
+        $stamp = trim((string) $this->getConfiguration('lastcontact', ''));
+        if ($stamp !== '') {
+            return $stamp;
+        }
+        $cmd = $this->getCmd(null, 'lastcontact');
+        return is_object($cmd) ? trim((string) $cmd->execCmd()) : '';
+    }
+
+    /* L'âge du dernier contact en secondes, ou null si l'écran n'a jamais
+     * appelé. */
+    public function contactAge() {
+        $stamp = $this->lastContact();
+        if ($stamp === '') {
+            return null;
+        }
+        $time = strtotime($stamp);
+        return ($time === false) ? null : max(0, time() - $time);
+    }
+
+    /*
+     * L'écran a-t-il donné signe de vie récemment ?
+     *
+     * Trois intervalles de rafraîchissement : un ping perdu et un autre en
+     * retard ne doivent pas faire clignoter « hors ligne » sur une installation
+     * parfaitement saine. La granularité d'horodatage est comptée en plus, sans
+     * quoi un écran qui répond parfaitement paraîtrait en retard d'une minute.
+     */
+    public function isOnline() {
+        $age = $this->contactAge();
+        if ($age === null) {
+            return false;
+        }
+        return $age <= (3 * $this->poll()) + self::CONTACT_GRANULARITY;
+    }
+
+    /* Le dernier contact tel qu'on le lit : la date, et depuis combien de
+     * temps. « 22/09/2026 11:03:05 (il y a 2 min) » se comprend d'un coup
+     * d'oeil, là où une date seule oblige à regarder l'heure qu'il est. */
+    public static function humanContact($_stamp) {
+        $stamp = trim((string) $_stamp);
+        if ($stamp === '') {
+            return '';
+        }
+        $time = strtotime($stamp);
+        if ($time === false) {
+            return $stamp;
+        }
+        $age = max(0, time() - $time);
+        if ($age < 60) {
+            $ago = sprintf(__('il y a %s s', __FILE__), $age);
+        } elseif ($age < 3600) {
+            $ago = sprintf(__('il y a %s min', __FILE__), (int) floor($age / 60));
+        } elseif ($age < 86400) {
+            $ago = sprintf(__('il y a %s h', __FILE__), (int) floor($age / 3600));
+        } else {
+            $ago = sprintf(__('il y a %s j', __FILE__), (int) floor($age / 86400));
+        }
+        return date('d/m/Y H:i:s', $time) . ' (' . $ago . ')';
+    }
+
+    /*
+     * Horodate le dernier échange avec la carte, et retient ce qu'elle a fait.
+     *
+     * Écrit à DEUX endroits, et c'est voulu :
+     *
+     *  - la configuration de l'équipement, qui est la source consultée par le
+     *    plugin lui-même. La v1.0 ne l'écrivait pas, et c'est la raison pour
+     *    laquelle « getConfiguration('lastcontact') » rendait une chaîne vide
+     *    sur un écran qui dialoguait pourtant parfaitement : l'horodatage
+     *    n'existait que dans une commande d'information ;
+     *  - la commande d'information « Dernier contact », pour que l'écran soit
+     *    un équipement ordinaire sur le dashboard et qu'un scénario puisse
+     *    réagir à sa disparition.
+     *
+     * À la MINUTE, et non à chaque appel. Une carte « ping » toutes les 30 s ;
+     * avec dix écrans, horodater chaque appel ferait six cents écritures par
+     * heure pour une information dont personne ne lit la seconde. Un appui,
+     * lui, est rare et intéressant : il est toujours écrit.
+     *
+     * save(true) et non save() : l'écriture est DIRECTE, sans preSave() ni
+     * postSave(). Un ping ne doit ni recalculer la signature de mise en page, ni
+     * risquer de faire bouger le compteur de version, ni recréer les commandes,
+     * ni écrire une ligne de journal — il ne doit poser qu'une date.
+     */
     public function noteContact($_press = null) {
-        $this->checkAndUpdateCmd('lastcontact', date('Y-m-d H:i:s'));
+        $now   = time();
+        $stamp = date('Y-m-d H:i:s', $now);
+        $age   = $this->contactAge();
+
+        if ($_press === null && $age !== null && $age < self::CONTACT_GRANULARITY) {
+            return false;
+        }
+
+        $this->setConfiguration('lastcontact', $stamp);
+        $this->save(true);
+
+        $this->checkAndUpdateCmd('lastcontact', $stamp);
         $this->checkAndUpdateCmd('version', $this->version());
         if ($_press !== null) {
             $this->checkAndUpdateCmd('lastpress', $_press);
         }
+        return true;
     }
 
     /* ==================================================== CYCLE DE VIE eqLogic */
@@ -537,7 +905,11 @@ class glowscreen32 extends eqLogic {
         }
 
         $this->setConfiguration('poll', $this->poll());
-        $this->setConfiguration('buttons', $this->buttons());
+        $buttons = $this->buttons();
+        /* Refusé AVANT l'écriture : un interrupteur sans état s'enregistrerait
+         * sans rien dire et se découvrirait sur le mur, un appui sur deux. */
+        self::checkButtons($buttons);
+        $this->setConfiguration('buttons', $buttons);
 
         /*
          * Le compteur de version. Incrémenté ici, avant l'écriture, pour ne pas
@@ -553,6 +925,73 @@ class glowscreen32 extends eqLogic {
             $this->setConfiguration('version', $this->version() + (($this->getId() == '') ? 0 : 1));
             $this->setConfiguration('layout_signature', $signature);
         }
+    }
+
+    /*
+     * Ce qu'un bouton doit porter pour être enregistrable.
+     *
+     * Un interrupteur SANS commande d'état est refusé : sans état, rien ne
+     * permet de décider s'il faut allumer ou éteindre, et le bouton ferait
+     * exactement ce que la v1.2 faisait — allumer, toujours. Le refus est au
+     * moment de la sauvegarde, avec le numéro de l'emplacement fautif : c'est
+     * le seul endroit où l'utilisateur regarde encore le formulaire.
+     *
+     * Une commande d'état DÉSIGNÉE mais supprimée depuis n'est pas refusée : le
+     * bouton disparaît alors simplement de la mise en page, avec une ligne de
+     * journal. Bloquer la sauvegarde là-dessus empêcherait de corriger quoi que
+     * ce soit d'autre sur l'écran.
+     */
+    public static function checkButtons($_buttons) {
+        foreach ($_buttons as $index => $button) {
+            if ($button['mode'] !== self::MODE_TOGGLE || !self::buttonConfigured($button)) {
+                continue;
+            }
+            $where = self::buttonWhere($index, $button);
+
+            if ($button['state'] === '') {
+                throw new Exception(sprintf(
+                    __('%s : un interrupteur a besoin d\'une commande d\'état. Sans elle, rien ne permet de décider s\'il faut allumer ou éteindre — désignez la commande d\'information qui dit si l\'équipement est allumé, ou repassez le bouton en « Action simple ».', __FILE__),
+                    $where
+                ));
+            }
+            /* Une commande d'ACTION dans le champ d'état : le sélecteur ne le
+             * permet pas, une saisie à la main si. Elle ne rendrait jamais
+             * d'état, et le bouton n'allumerait que. */
+            try {
+                $state = cmd::byString($button['state']);
+            } catch (Throwable $e) {
+                $state = null;
+            }
+            if (is_object($state) && $state->getType() != 'info') {
+                throw new Exception(sprintf(
+                    __('%s : la commande d\'état doit être une commande d\'information, celle qui DIT si l\'équipement est allumé.', __FILE__),
+                    $where
+                ));
+            }
+
+            if ($button['on'] === '' && $button['off'] === '' && $button['toggle'] === '') {
+                throw new Exception(sprintf(
+                    __('%s : un interrupteur a besoin d\'une commande « Allumer » et d\'une commande « Éteindre ».', __FILE__),
+                    $where
+                ));
+            }
+            /* Une seule des deux, sans « Basculer » : le bouton n'irait que
+             * dans un sens — précisément le défaut qu'on corrige. */
+            if ($button['toggle'] === '' && ($button['on'] === '' || $button['off'] === '')) {
+                throw new Exception(sprintf(
+                    __('%s : il manque la commande « %s ». Avec une seule des deux, le bouton ne va que dans un sens — c\'est exactement ce que le mode interrupteur corrige.', __FILE__),
+                    $where,
+                    ($button['on'] === '') ? __('Allumer', __FILE__) : __('Éteindre', __FILE__)
+                ));
+            }
+        }
+    }
+
+    /* « Bouton 1 « Facade » » — de quoi retrouver l'emplacement fautif dans un
+     * formulaire de six lignes qui se ressemblent toutes. */
+    public static function buttonWhere($_index, $_button) {
+        $where = sprintf(__('Bouton %s', __FILE__), $_index + 1);
+        return ($_button['label'] !== '') ? $where . ' « ' . $_button['label'] . ' »' : $where;
     }
 
     public function postSave() {
@@ -634,23 +1073,26 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
-     * La vue d'ensemble du parc, pour la liste des écrans. Un seul écran ne
-     * justifierait pas ce tableau ; à partir de trois, savoir lequel ne répond
-     * plus est la première question qu'on se pose, et la seule chose qui y
-     * réponde est la date du dernier appel reçu.
+     * La vue d'ensemble du parc, pour la liste des écrans. Avec plusieurs
+     * écrans, savoir lequel ne répond plus est la première question qu'on se
+     * pose, et la seule chose qui y réponde est la date du dernier appel reçu.
      */
     public static function overview() {
         $screens = array();
         foreach (eqLogic::byType('glowscreen32') as $eqLogic) {
-            $contact = $eqLogic->getCmd(null, 'lastcontact');
+            $contact = $eqLogic->lastContact();
             $screens[] = array(
                 'id'      => $eqLogic->getId(),
                 'name'    => $eqLogic->getName(),
                 'mac'     => self::prettyMac($eqLogic->getConfiguration('mac', '')),
                 'enable'  => (int) $eqLogic->getIsEnable(),
                 'version' => $eqLogic->version(),
+                'poll'    => $eqLogic->poll(),
                 'buttons' => count($eqLogic->layout()['buttons']),
-                'contact' => is_object($contact) ? (string) $contact->execCmd() : '',
+                'contact' => $contact,
+                'human'   => self::humanContact($contact),
+                'age'     => $eqLogic->contactAge(),
+                'online'  => $eqLogic->isOnline(),
             );
         }
         return $screens;

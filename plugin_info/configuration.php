@@ -50,7 +50,7 @@ $gsScreens = class_exists('glowscreen32') ? glowscreen32::overview() : array();
 							<th style="width:170px;">{{Adresse MAC}}</th>
 							<th style="width:90px;">{{Boutons}}</th>
 							<th style="width:90px;">{{Version}}</th>
-							<th style="width:180px;">{{Dernier contact}}</th>
+							<th style="width:230px;">{{Dernier contact}}</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -63,13 +63,22 @@ $gsScreens = class_exists('glowscreen32') ? glowscreen32::overview() : array();
 								<td><code><?php echo ($gsScreen['mac'] != '') ? $gsScreen['mac'] : '—'; ?></code></td>
 								<td><?php echo $gsScreen['buttons']; ?></td>
 								<td><?php echo $gsScreen['version']; ?></td>
-								<td><?php echo ($gsScreen['contact'] != '') ? $gsScreen['contact'] : '{{jamais vu}}'; ?></td>
+								<td>
+									<?php if ($gsScreen['human'] == '') { ?>
+										<span class="label label-default">{{jamais vu}}</span>
+									<?php } else { ?>
+										<?php echo $gsScreen['human']; ?>
+										<?php if (!$gsScreen['online']) { ?>
+											<span class="label label-warning">{{hors ligne}}</span>
+										<?php } ?>
+									<?php } ?>
+								</td>
 							</tr>
 						<?php } ?>
 					</tbody>
 				</table>
 			</div>
-			<span class="help-block" style="margin:0;">{{Le dernier contact est horodaté à chaque appel reçu de la carte, « layout » comme « ping » : un écran qui n'apparaît plus depuis plus longtemps que son intervalle de rafraîchissement est hors ligne. Un écran sans adresse MAC n'est joignable par aucune carte.}}</span>
+			<span class="help-block" style="margin:0;">{{Le dernier contact est horodaté à chaque appel reçu de la carte, « layout » comme « ping », et arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle. Un écran sans adresse MAC n'est joignable par aucune carte.}}</span>
 		<?php } ?>
 	</fieldset>
 

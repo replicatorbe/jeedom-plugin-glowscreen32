@@ -57,6 +57,36 @@ if (file_exists(__DIR__ . '/../core/php/.htaccess')) {
               . 'inaccessible.';
 }
 
+/* --- Le .htaccess de plugin_info ne doit pas bloquer l'icône -------------- */
+$htaccess = __DIR__ . '/../plugin_info/.htaccess';
+if (!file_exists($htaccess)) {
+    $echecs[] = 'plugin_info/.htaccess est absent : configuration.php serait servi en clair.';
+} elseif (strpos(file_get_contents($htaccess), 'allow from all') === false) {
+    $echecs[] = 'plugin_info/.htaccess interdit tout, images comprises : la vignette du '
+              . 'plugin ne s\'affichera nulle part et chaque affichage déposera un '
+              . '« client denied by server configuration » dans log/http.error.';
+}
+
+/* --- Le mode de bouton du contrat v1.3 doit exister ------------------------
+ * Sans lui, un bouton lié à la seule commande « Allumer » d'un Shelly allume
+ * sans jamais éteindre : c'est le défaut constaté sur le mur en v1.0, et il ne
+ * se voit ni au php -l, ni à la relecture d'un formulaire. */
+foreach (array('MODE_TOGGLE', 'MODE_ACTION', 'pressToggle', 'checkButtons') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : le mode de bouton du contrat v1.3 n\'est '
+                  . 'plus mis en oeuvre.';
+    }
+}
+
+/* --- Le dernier contact doit aller dans la CONFIGURATION -------------------
+ * La v1.0 ne l'écrivait que dans une commande d'information, et
+ * getConfiguration('lastcontact') rendait une chaîne vide sur un écran qui
+ * dialoguait parfaitement. */
+if (strpos($source, "setConfiguration('lastcontact'") === false) {
+    $echecs[] = 'noteContact() n\'écrit pas lastcontact dans la configuration : '
+              . 'getConfiguration(\'lastcontact\') rendra de nouveau une chaîne vide.';
+}
+
 if (count($echecs) === 0) {
     echo "OK — aucune propriété sans souligné, aucune méthode interdite.\n";
     exit(0);

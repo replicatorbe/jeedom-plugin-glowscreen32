@@ -77,6 +77,15 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 		opacity: .75;
 	}
 
+	/* Le rang du contrat v1.3, en petit sous le libellé : c'est ce que la carte
+	   renvoie à « press », et le seul moyen d'essayer un bouton au curl sans
+	   compter les emplacements à la main. */
+	.glowscreen32TileRank {
+		font-size: 9px;
+		opacity: .55;
+		font-family: monospace;
+	}
+
 	/* La MAC sous le nom de la vignette : discrète, mais toujours là. Avec
 	   plusieurs écrans, c'est elle qui dit lequel est lequel. */
 	.glowscreen32CardMac {
@@ -142,7 +151,7 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 		echo '</div>';
 		?>
 
-		<?php if (count($eqLogics) > 1) { ?>
+		<?php if (count($eqLogics) > 0) { ?>
 			<legend><i class="fas fa-satellite-dish"></i> {{Le parc en un coup d'oeil}}</legend>
 			<div class="table-responsive" style="margin:5px;">
 				<table class="table table-bordered table-condensed">
@@ -152,7 +161,7 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 							<th style="width:170px;">{{Adresse MAC}}</th>
 							<th style="width:90px;">{{Boutons}}</th>
 							<th style="width:90px;">{{Version}}</th>
-							<th style="width:180px;">{{Dernier contact}}</th>
+							<th style="width:230px;">{{Dernier contact}}</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -162,13 +171,22 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 								<td><code><?php echo ($gsScreen['mac'] != '') ? $gsScreen['mac'] : '—'; ?></code></td>
 								<td><?php echo $gsScreen['buttons']; ?></td>
 								<td><?php echo $gsScreen['version']; ?></td>
-								<td><?php echo ($gsScreen['contact'] != '') ? $gsScreen['contact'] : '{{jamais vu}}'; ?></td>
+								<td>
+									<?php if ($gsScreen['human'] == '') { ?>
+										<span class="label label-default">{{jamais vu}}</span>
+									<?php } else { ?>
+										<?php echo $gsScreen['human']; ?>
+										<?php if (!$gsScreen['online']) { ?>
+											<span class="label label-warning">{{hors ligne}}</span>
+										<?php } ?>
+									<?php } ?>
+								</td>
 							</tr>
 						<?php } ?>
 					</tbody>
 				</table>
 			</div>
-			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping » : un écran qui n'apparaît plus depuis plus longtemps que son intervalle de rafraîchissement est hors ligne.}}</span>
+			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping ». Il est arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle.}}</span>
 		<?php } ?>
 	</div>
 
@@ -311,6 +329,13 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 									<span class="help-block" style="margin:0;">{{Ce compteur augmente à chaque changement de mise en page. La carte le surveille et ne redessine son écran que lorsqu'il bouge.}}</span>
 								</div>
 							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Dernier contact}}</label>
+								<div class="col-sm-9">
+									<span class="form-control-static" id="span_glowscreen32Contact">-</span>
+									<span class="help-block" style="margin:0;">{{Le dernier appel reçu de cette carte, « layout » comme « ping », arrondi à la minute. Avec plusieurs écrans, c'est ce champ qui dit lequel ne répond plus. La valeur affichée date de l'ouverture de la page.}}</span>
+								</div>
+							</div>
 						</fieldset>
 					</form>
 				</div>
@@ -322,7 +347,7 @@ sendVarToJS('glowscreen32Api', glowscreen32::apiInfo());
 				<div class="col-lg-7">
 					<div class="alert alert-info" style="margin-bottom:10px;">
 						<b>{{Six boutons, dans l'ordre de l'écran.}}</b>
-						{{Chacun porte un libellé, une couleur, une icône, et ce que l'appui déclenche : une commande d'action de votre Jeedom, ou un scénario. Un bouton sans cible n'est pas envoyé à la carte — il ne laisse pas de case vide, les boutons suivants remontent.}}
+						{{Chacun porte un libellé, une couleur, une icône, et un mode. En « Action simple », l'appui joue toujours la même commande — c'est ce qu'il faut pour un portail ou un scénario. En « Interrupteur », le plugin lit l'état et joue la commande inverse : un appui allume, le suivant éteint. Un bouton incomplet n'est pas envoyé à la carte — il ne laisse pas de case vide, les boutons suivants remontent.}}
 					</div>
 					<form class="form-horizontal">
 						<div id="div_glowscreen32Buttons"></div>

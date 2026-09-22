@@ -1,2 +1,10 @@
 Order allow,deny
+# L'icone du plugin est servie par Apache depuis ce dossier : sans cette
+# exception, la vignette du plugin ne s'affiche nulle part et chaque affichage
+# depose un « client denied by server configuration » dans log/http.error.
+# C'est le .htaccess que portent les quatorze autres plugins de cette
+# installation, repris tel quel.
+<Files ~ "\.(jpg|jpeg|png|gif|pdf|txt|bmp)$">
+   allow from all
+</Files>
 Deny from all

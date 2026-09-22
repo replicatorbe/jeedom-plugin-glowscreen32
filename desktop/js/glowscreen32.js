@@ -79,6 +79,19 @@ function glowscreen32ButtonEdited(_target) {
 
 /* ============================================================== BOUTONS */
 
+/* Un champ « commande », avec son sélecteur. Les quatre champs d'un bouton qui
+   désignent une commande sont construits ici : un seul endroit à corriger, et
+   le même bouton de choix partout. */
+function glowscreen32CmdField(_key, _placeholder, _title, _type) {
+  var html = '<div class="input-group">'
+  html += '<input class="glowscreen32ButtonAttr form-control input-sm roundedLeft" data-l1key="' + _key + '" placeholder="' + _placeholder + '">'
+  html += '<span class="input-group-btn">'
+  html += '<a class="btn btn-default btn-sm roundedRight glowscreen32Pick" data-field="' + _key + '" data-cmdtype="' + _type + '" title="' + _title + '"><i class="fas fa-list-alt"></i></a>'
+  html += '</span>'
+  html += '</div>'
+  return html
+}
+
 /*
  * Un emplacement de la grille. Les six sont toujours dessinés, remplis ou non :
  * une liste qui s'allonge quand on clique sur « ajouter » ferait croire qu'on
@@ -104,6 +117,24 @@ function glowscreen32AddButton(_rank, _button) {
   div += '</div>'
   div += '</div>'
 
+  /* Le mode d'abord : il commande tout le reste de la ligne. Un bouton qui
+     n'allume que, parce qu'il est câblé sur la seule commande « Allumer »,
+     était le défaut le plus visible de la version précédente. */
+  div += '<div class="form-group" style="margin:0 0 6px 0;">'
+  div += '<label class="col-sm-3 control-label">{{Mode}}</label>'
+  div += '<div class="col-sm-4">'
+  div += '<select class="glowscreen32ButtonAttr form-control input-sm glowscreen32Mode" data-l1key="mode">'
+  div += '<option value="action">{{Action simple}}</option>'
+  div += '<option value="toggle">{{Interrupteur (allumer / éteindre)}}</option>'
+  div += '</select>'
+  div += '</div>'
+  div += '<div class="col-sm-5">'
+  div += '<span class="help-block glowscreen32ModeHelp" style="margin:0;"></span>'
+  div += '</div>'
+  div += '</div>'
+
+  /* --- Mode « action simple » ------------------------------------------- */
+  div += '<div class="glowscreen32ModeAction">'
   div += '<div class="form-group" style="margin:0;">'
   div += '<label class="col-sm-3 control-label">{{Déclenche}}</label>'
   div += '<div class="col-sm-3">'
@@ -113,32 +144,47 @@ function glowscreen32AddButton(_rank, _button) {
   div += '<option value="scenario">{{Un scénario}}</option>'
   div += '</select>'
   div += '</div>'
-
   div += '<div class="col-sm-6 glowscreen32TargetCmd">'
-  div += '<div class="input-group">'
-  div += '<input class="glowscreen32ButtonAttr form-control input-sm roundedLeft" data-l1key="cmd" placeholder="{{Commande à déclencher}}">'
-  div += '<span class="input-group-btn">'
-  div += '<a class="btn btn-default btn-sm roundedRight glowscreen32ListCmd" title="{{Choisir une commande}}"><i class="fas fa-list-alt"></i></a>'
-  div += '</span>'
+  div += glowscreen32CmdField('cmd', '{{Commande à déclencher}}', '{{Choisir une commande}}', 'action')
   div += '</div>'
-  div += '</div>'
-
   div += '<div class="col-sm-6 glowscreen32TargetScenario">'
   div += '<select class="glowscreen32ButtonAttr form-control input-sm" data-l1key="scenario"></select>'
   div += '</div>'
   div += '</div>'
-
-  /* La commande d'état, facultative. C'est elle que la carte lit à chaque
-     sondage pour savoir si la pastille du bouton doit être allumée. */
-  div += '<div class="form-group" style="margin:6px 0 0 0;">'
-  div += '<label class="col-sm-3 control-label">{{Pastille allumée si}}</label>'
-  div += '<div class="col-sm-9">'
-  div += '<div class="input-group">'
-  div += '<input class="glowscreen32ButtonAttr form-control input-sm roundedLeft" data-l1key="state" placeholder="{{Commande d\'information binaire — facultatif}}">'
-  div += '<span class="input-group-btn">'
-  div += '<a class="btn btn-default btn-sm roundedRight glowscreen32ListState" title="{{Choisir la commande d\'état}}"><i class="fas fa-list-alt"></i></a>'
-  div += '</span>'
   div += '</div>'
+
+  /* --- Mode « interrupteur » -------------------------------------------- */
+  div += '<div class="glowscreen32ModeToggle">'
+  div += '<div class="form-group" style="margin:0 0 6px 0;">'
+  div += '<label class="col-sm-3 control-label">{{Allumer}}</label>'
+  div += '<div class="col-sm-9">'
+  div += glowscreen32CmdField('on', '{{Commande qui allume}}', '{{Choisir la commande qui allume}}', 'action')
+  div += '</div>'
+  div += '</div>'
+  div += '<div class="form-group" style="margin:0 0 6px 0;">'
+  div += '<label class="col-sm-3 control-label">{{Éteindre}}</label>'
+  div += '<div class="col-sm-9">'
+  div += glowscreen32CmdField('off', '{{Commande qui éteint}}', '{{Choisir la commande qui éteint}}', 'action')
+  div += '</div>'
+  div += '</div>'
+  div += '<div class="form-group" style="margin:0;">'
+  div += '<label class="col-sm-3 control-label">{{Basculer}}</label>'
+  div += '<div class="col-sm-9">'
+  div += glowscreen32CmdField('toggle', '{{Commande « basculer » — facultatif}}', '{{Choisir la commande qui bascule}}', 'action')
+  div += '<span class="help-block" style="margin:0;">{{Secours seulement : le plugin choisit normalement « Allumer » ou « Éteindre » d\'après l\'état, car une commande « basculer » désynchronisée inverse l\'état affiché sur l\'écran. Elle ne sert que si l\'état devient illisible.}}</span>'
+  div += '</div>'
+  div += '</div>'
+  div += '</div>'
+
+  /* --- L'état, commun aux deux modes ------------------------------------ */
+  div += '<div class="form-group" style="margin:6px 0 0 0;">'
+  div += '<label class="col-sm-3 control-label">'
+  div += '<span class="glowscreen32StateAction">{{Pastille allumée si}}</span>'
+  div += '<span class="glowscreen32StateToggle">{{État (obligatoire)}}</span>'
+  div += '</label>'
+  div += '<div class="col-sm-9">'
+  div += glowscreen32CmdField('state', '{{Commande d\'information binaire}}', '{{Choisir la commande d\'état}}', 'info')
+  div += '<span class="help-block glowscreen32StateHelp" style="margin:0;"></span>'
   div += '</div>'
   div += '</div>'
   div += '</div>'
@@ -160,12 +206,18 @@ function glowscreen32AddButton(_rank, _button) {
        se lit comme un choix et n'en est pas un. */
     color: glowscreen32Color(button.color),
     icon: init(button.icon, ''),
+    /* Un bouton enregistré avant le mode vaut « action » : c'est exactement ce
+       qu'il faisait, et aucune configuration existante ne change de sens. */
+    mode: (init(button.mode, 'action') === 'toggle') ? 'toggle' : 'action',
     target: init(button.target, ''),
     cmd: init(button.cmd, ''),
+    on: init(button.on, ''),
+    off: init(button.off, ''),
+    toggle: init(button.toggle, ''),
     state: init(button.state, '')
   }, '.glowscreen32ButtonAttr')
 
-  glowscreen32ShowTarget(block)
+  glowscreen32ShowMode(block)
   return block
 }
 
@@ -217,6 +269,29 @@ function glowscreen32ShowTarget(_block) {
   _block.querySelector('.glowscreen32TargetScenario').style.display = (target === 'scenario') ? '' : 'none'
 }
 
+/* Montre les champs du mode choisi, et masque ceux de l'autre. Un formulaire
+   qui affiche « Allumer », « Éteindre » ET « Déclenche » laisse croire qu'il
+   faut tout remplir, et l'utilisateur remplit alors celui qui ne sert pas. */
+function glowscreen32ShowMode(_block) {
+  var mode = _block.querySelector('.glowscreen32Mode').value
+  var toggle = (mode === 'toggle')
+
+  _block.querySelector('.glowscreen32ModeAction').style.display = toggle ? 'none' : ''
+  _block.querySelector('.glowscreen32ModeToggle').style.display = toggle ? '' : 'none'
+  _block.querySelector('.glowscreen32StateAction').style.display = toggle ? 'none' : ''
+  _block.querySelector('.glowscreen32StateToggle').style.display = toggle ? '' : 'none'
+
+  _block.querySelector('.glowscreen32ModeHelp').textContent = toggle
+    ? '{{Le plugin lit l\'état, puis joue la commande inverse : un appui allume, le suivant éteint.}}'
+    : '{{Une commande d\'action ou un scénario, joué tel quel à chaque appui. Pour un relais impulsionnel, un portail, une scène.}}'
+
+  _block.querySelector('.glowscreen32StateHelp').textContent = toggle
+    ? '{{Obligatoire : sans état, rien ne permet de décider s\'il faut allumer ou éteindre. La sauvegarde est refusée.}}'
+    : '{{Facultatif. Laissé vide, le plugin reprend l\'état que Jeedom associe déjà à la commande d\'action.}}'
+
+  if (!toggle) { glowscreen32ShowTarget(_block) }
+}
+
 /* Les six emplacements, dans l'ordre. */
 function glowscreen32RenderButtons(_eqLogic) {
   var container = document.getElementById('div_glowscreen32Buttons')
@@ -246,13 +321,29 @@ function glowscreen32CollectButtons() {
       label: init(button.label, ''),
       color: glowscreen32Color(button.color),
       icon: init(button.icon, ''),
+      mode: (init(button.mode, 'action') === 'toggle') ? 'toggle' : 'action',
       target: init(button.target, ''),
       cmd: init(button.cmd, ''),
       scenario: parseInt(init(button.scenario, 0), 10) || 0,
+      on: init(button.on, ''),
+      off: init(button.off, ''),
+      toggle: init(button.toggle, ''),
       state: init(button.state, '')
     })
   }
   return buttons
+}
+
+/* Ce bouton sera-t-il envoyé à la carte ? Le même filtre que activeButtons()
+   côté plugin, aux commandes supprimées près, que le navigateur ne peut pas
+   connaître — c'est à cela que sert « Voir ce que la carte reçoit ». */
+function glowscreen32ButtonDrawn(_button) {
+  if (_button.mode === 'toggle') {
+    return _button.state !== '' && (_button.on !== '' || _button.off !== '' || _button.toggle !== '')
+  }
+  if (_button.target === 'cmd') { return _button.cmd !== '' }
+  if (_button.target === 'scenario') { return _button.scenario > 0 }
+  return false
 }
 
 /*
@@ -269,8 +360,7 @@ function glowscreen32RenderPreview() {
   var buttons = glowscreen32CollectButtons()
   var drawn = []
   for (var i = 0; i < buttons.length; i++) {
-    if (buttons[i].target === 'cmd' && buttons[i].cmd !== '') { drawn.push(buttons[i]) }
-    else if (buttons[i].target === 'scenario' && buttons[i].scenario > 0) { drawn.push(buttons[i]) }
+    if (glowscreen32ButtonDrawn(buttons[i])) { drawn.push(buttons[i]) }
   }
 
   for (var slot = 0; slot < GLOWSCREEN32_MAX_BUTTONS; slot++) {
@@ -294,6 +384,13 @@ function glowscreen32RenderPreview() {
        relu ici à chaque frappe. */
     label.textContent = (drawn[slot].label !== '') ? drawn[slot].label : '…'
     tile.appendChild(label)
+    /* Le rang du contrat v1.3, celui que la carte renverra à « press ». Le
+       montrer ici évite d'avoir à le compter à la main quand on essaie un
+       bouton au curl. */
+    var rank = document.createElement('div')
+    rank.className = 'glowscreen32TileRank'
+    rank.textContent = 'id ' + slot + (drawn[slot].mode === 'toggle' ? ' ⇄' : '')
+    tile.appendChild(rank)
     grid.appendChild(tile)
   }
 }
@@ -310,13 +407,47 @@ function printEqLogic(_eqLogic) {
   }
 
   var configuration = init(_eqLogic.configuration, {})
+  var saved = isset(_eqLogic.id) && _eqLogic.id != ''
+
   var version = document.getElementById('span_glowscreen32Version')
   if (version !== null) {
-    version.textContent = (isset(_eqLogic.id) && _eqLogic.id != '') ? init(configuration.version, 1) : '-'
+    version.textContent = saved ? init(configuration.version, 1) : '-'
+  }
+
+  var contact = document.getElementById('span_glowscreen32Contact')
+  if (contact !== null) {
+    contact.textContent = saved
+      ? glowscreen32HumanContact(init(configuration.lastcontact, ''))
+      : '-'
   }
 
   glowscreen32RenderButtons(_eqLogic)
   glowscreen32ShowApi(init(configuration.mac, ''))
+}
+
+/* « 22/09/2026 11:03:05 (il y a 2 min) ». Une date seule oblige à regarder
+   l'heure qu'il est pour savoir si l'écran répond encore. */
+function glowscreen32HumanContact(_stamp) {
+  var stamp = String(init(_stamp, '')).trim()
+  if (stamp === '') { return '{{jamais vu}}' }
+
+  /* Découpé à la main : « 2026-09-22 11:03:05 » n'est pas de l'ISO 8601, et
+     Date.parse le refuse ou l'interprète en UTC selon le navigateur. */
+  var parts = stamp.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/)
+  if (parts === null) { return stamp }
+  var date = new Date(+parts[1], +parts[2] - 1, +parts[3], +parts[4], +parts[5], +parts[6])
+  var age = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000))
+
+  /* La phrase entière est traduite, et non ses morceaux : « 2 min ago » ne se
+     fabrique pas en recollant « il y a » et « min ». */
+  var ago
+  if (age < 60) { ago = '{{il y a %s s}}'.replace('%s', age) }
+  else if (age < 3600) { ago = '{{il y a %s min}}'.replace('%s', Math.floor(age / 60)) }
+  else if (age < 86400) { ago = '{{il y a %s h}}'.replace('%s', Math.floor(age / 3600)) }
+  else { ago = '{{il y a %s j}}'.replace('%s', Math.floor(age / 86400)) }
+
+  return parts[3] + '/' + parts[2] + '/' + parts[1] + ' ' + parts[4] + ':' + parts[5] + ':' + parts[6]
+    + ' (' + ago + ')'
 }
 
 /* L'URL, la clé, et l'appel complet à recopier dans le firmware.
@@ -428,7 +559,9 @@ glowscreen32Container.addEventListener('change', function (event) {
   var block = event.target.closest('.glowscreen32Button')
   if (block === null) { return }
 
-  if (event.target.closest('.glowscreen32Target')) {
+  if (event.target.closest('.glowscreen32Mode')) {
+    glowscreen32ShowMode(block)
+  } else if (event.target.closest('.glowscreen32Target')) {
     glowscreen32ShowTarget(block)
   }
   if (glowscreen32ButtonEdited(event.target)) {
@@ -440,29 +573,21 @@ glowscreen32Container.addEventListener('change', function (event) {
 glowscreen32Container.addEventListener('click', function (event) {
   var target = null
 
-  if (target = event.target.closest('.glowscreen32ListCmd')) {
+  if (target = event.target.closest('.glowscreen32Pick')) {
     var block = target.closest('.glowscreen32Button')
+    var field = target.getAttribute('data-field')
+    /* Type « action » pour ce qui FAIT quelque chose, type « info » pour ce qui
+       DIT quelque chose : le sélecteur ne propose que ce qui convient au champ,
+       plutôt que de laisser découvrir le contresens à l'enregistrement. */
+    var cmdType = target.getAttribute('data-cmdtype')
     /* Le sélecteur rappelle avec { human: '#[Objet][Équipement][Commande]#' }.
        C'est cette forme qui est posée dans le champ ; le coeur la convertit en
        identifiant à l'enregistrement (jeedom::fromHumanReadable), si bien qu'un
        renommage ultérieur ne casse pas le bouton. */
-    jeedom.cmd.getSelectModal({ cmd: { type: 'action' } }, function (result) {
-      block.querySelector('.glowscreen32ButtonAttr[data-l1key="cmd"]').jeeValue(result.human)
+    jeedom.cmd.getSelectModal({ cmd: { type: cmdType } }, function (result) {
+      block.querySelector('.glowscreen32ButtonAttr[data-l1key="' + field + '"]').jeeValue(result.human)
       glowscreen32MarkModified()
       glowscreen32RenderPreview()
-    })
-    return
-  }
-
-  if (target = event.target.closest('.glowscreen32ListState')) {
-    var stateBlock = target.closest('.glowscreen32Button')
-    /* Type info, et non action : la commande d'état est celle qui DIT quelque
-       chose, pas celle qui fait quelque chose. Le firmware n'allume la pastille
-       que sur un sous-type binaire — le plugin rend null pour tout le reste
-       plutôt que d'afficher une consigne de température comme un interrupteur. */
-    jeedom.cmd.getSelectModal({ cmd: { type: 'info' } }, function (result) {
-      stateBlock.querySelector('.glowscreen32ButtonAttr[data-l1key="state"]').jeeValue(result.human)
-      glowscreen32MarkModified()
     })
     return
   }

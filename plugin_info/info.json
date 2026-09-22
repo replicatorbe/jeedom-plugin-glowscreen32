@@ -1,10 +1,10 @@
 {
     "id": "glowscreen32",
     "name": "GlowScreen32",
-    "pluginVersion": "1.0",
+    "pluginVersion": "1.1",
     "description": {
-        "fr_FR": "Pilote des écrans tactiles ESP32 depuis Jeedom. Un équipement représente un écran physique, reconnu à son adresse MAC, et porte jusqu'à six boutons : un libellé, une couleur, une icône, et la commande d'action ou le scénario que l'appui déclenche. La carte récupère sa mise en page par un point d'entrée HTTP protégé par la clé API du plugin, signale ses appuis, et ne redessine son écran que lorsque le compteur de version change.",
-        "en_US": "Drives ESP32 touch screens from Jeedom. One device stands for one physical screen, identified by its MAC address, and carries up to six buttons: a label, a colour, an icon, and the action command or scenario the press triggers. The board fetches its layout from an HTTP endpoint protected by the plugin API key, reports presses, and only redraws its screen when the version counter changes."
+        "fr_FR": "Pilote des écrans tactiles ESP32 depuis Jeedom. Un équipement représente un écran physique, reconnu à son adresse MAC, et porte jusqu'à six boutons : un libellé, une couleur, une icône, et un mode. En mode « action simple » l'appui joue toujours la même commande ou le même scénario ; en mode « interrupteur » le plugin lit l'état de l'équipement et joue la commande inverse, si bien qu'un appui allume et que le suivant éteint. La carte récupère sa mise en page par un point d'entrée HTTP protégé par la clé API du plugin, signale ses appuis en désignant le rang du bouton et non une commande, et ne redessine son écran que lorsque le compteur de version change.",
+        "en_US": "Drives ESP32 touch screens from Jeedom. One device stands for one physical screen, identified by its MAC address, and carries up to six buttons: a label, a colour, an icon, and a mode. In \"plain action\" mode a press always plays the same command or scenario; in \"switch\" mode the plugin reads the device state and plays the opposite command, so one press turns on and the next turns off. The board fetches its layout from an HTTP endpoint protected by the plugin API key, reports presses by naming the button's rank rather than a command, and only redraws its screen when the version counter changes."
     },
     "licence": "AGPL",
     "author": "sMug (Jérôme Fafchamps)",

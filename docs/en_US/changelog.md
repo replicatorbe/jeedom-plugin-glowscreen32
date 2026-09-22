@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.1
+
+Two fixes from a test on real hardware.
+
+- **Button mode** (API contract v1.3). "Plain action" keeps the previous
+  behaviour; "Switch" reads the state and plays the **opposite** command, so one
+  press turns on and the next turns off. A button wired to a Shelly's "Turn on"
+  command alone never turned anything off: fixed.
+- A switch button **without a state command is refused on save**, naming the
+  offending slot.
+- A device's "Toggle" command is accepted as an alternative setup, but only
+  played as a fallback: an out-of-sync toggle inverts the state shown on screen.
+- **`id` is now the button's rank** (0 to 5) rather than a Jeedom command id, in
+  `layout` as well as `press`. A board can no longer name an arbitrary command
+  of the installation. The negative-id convention for scenarios is gone.
+- `press` returns `pending`, and `state` is the **expected** state rather than
+  the observed one. The `states` array of the next `ping` remains the source of
+  truth.
+- **Last contact is now written to the device configuration**, not only to an
+  information command — `getConfiguration('lastcontact')` used to return an
+  empty string on a perfectly healthy screen. Rounded to the minute so a `ping`
+  from every screen does not write to the database, and displayed in readable
+  form with an "offline" label.
+- The plugin icon is served again: the `plugin_info/` `.htaccess` was blocking
+  images too, unlike every other plugin's.
+
 ## 1.0
 
 First release.

@@ -21,14 +21,46 @@ son identité en lisant sa propre adresse MAC au démarrage.
    carte. Le plugin normalise et refuse deux écrans portant la même adresse.
 3. **Onglet Boutons.** Six emplacements, dans l'ordre de la grille 3×2 : les
    trois premiers en haut, les trois suivants dessous. Pour chacun, un libellé,
-   une couleur, une icône, et ce que l'appui déclenche — une commande d'action
-   de votre Jeedom, ou un scénario. L'aperçu à droite montre l'écran tel que la
-   carte le dessinera.
+   une couleur, une icône, et un **mode** — voir ci-dessous. L'aperçu à droite
+   montre l'écran tel que la carte le dessinera, avec le rang de chaque bouton.
 4. **Sauvegardez.** Le compteur de version augmente, et la carte redessine à sa
    prochaine vérification.
 
 Un emplacement laissé vide n'est pas envoyé à la carte : il ne laisse pas de
 case morte sur l'écran, les boutons suivants remontent.
+
+### Les deux modes de bouton
+
+C'est le choix qui décide de ce que fait l'appui.
+
+| Mode | Ce qu'il fait | Ce qu'il faut remplir |
+|---|---|---|
+| **Action simple** | joue toujours la même chose | une commande d'action, ou un scénario |
+| **Interrupteur** | lit l'état, puis joue la commande **inverse** | « Allumer », « Éteindre », et une commande d'état |
+
+Un équipement comme un Shelly expose des commandes *distinctes* : `Allumer`,
+`Éteindre`, `Basculer`. Lier un bouton à une seule d'entre elles donne un bouton
+qui n'allume **que** — c'était le défaut de la version 1.0, constaté sur le mur :
+le premier appui allumait, le second ne faisait rien de visible.
+
+En mode **Interrupteur**, le plugin lit l'état avant d'agir et choisit
+lui-même : allumé → « Éteindre », éteint → « Allumer ». Un appui allume, le
+suivant éteint.
+
+Un bouton interrupteur **sans commande d'état est refusé à la sauvegarde** :
+sans état, rien ne permet de décider du sens, et le bouton ferait exactement ce
+que faisait la version précédente.
+
+Le champ **Basculer** est facultatif, et c'est un secours et non le chemin
+normal. Le choix explicite d'après l'état reste préférable : une commande
+« basculer » désynchronisée — un relais actionné à la main pendant que Jeedom ne
+regardait pas — inverse l'état que vous voyez sur l'écran, et l'écart ne se
+rattrape jamais. « Allumer quand c'est éteint » converge, lui, quoi qu'il se
+soit passé entre-temps. La commande « Basculer » n'est jouée que si l'état
+devient illisible.
+
+Le mode **Action simple** reste le bon choix pour tout ce qui n'a pas d'état :
+un relais impulsionnel, un portail, un scénario.
 
 ### L'icône
 
@@ -38,8 +70,10 @@ et le plugin n'a pas à la tenir à jour à sa place.
 
 ### La pastille d'un bouton
 
-Le champ **Pastille allumée si** désigne la commande d'information qui dit si le
-bouton doit apparaître allumé. Il est facultatif, et c'est lui qui fait foi.
+Le champ d'**état** désigne la commande d'information qui dit si le bouton doit
+apparaître allumé. Il est **facultatif en mode Action simple** — il s'appelle
+alors « Pastille allumée si » — et **obligatoire en mode Interrupteur**, où il
+sert en plus à décider du sens de l'appui. C'est lui qui fait foi.
 
 Laissé vide, le plugin reprend le lien que Jeedom pose lui-même entre une
 commande d'action et son état (le champ « valeur » de la commande d'action),
@@ -90,8 +124,15 @@ changé d'apparence.
 
 ## Le contrat d'API
 
-Le plugin implémente le contrat v1.2 partagé avec le firmware. Trois actions,
+Le plugin implémente le contrat v1.3 partagé avec le firmware. Trois actions,
 toutes en GET, toutes authentifiées.
+
+> **Changement de v1.3 :** `id` n'est plus l'identifiant d'une commande Jeedom,
+> c'est le **rang du bouton** dans la mise en page (0 à 5). La carte le traite
+> comme une valeur opaque et le renvoie tel quel. C'est le plugin qui décide
+> quelle commande exécuter. Bénéfice de sécurité : une carte ne peut plus
+> désigner une commande arbitraire de l'installation, seulement l'un de ses
+> propres boutons.
 
 ### `action=layout` — récupérer les boutons
 
@@ -108,7 +149,8 @@ curl -s -H "X-GLOWSCREEN32-APIKEY: <clé>" \
   "version": 3,
   "poll": 30,
   "buttons": [
-    { "id": 12, "label": "Salon", "color": "#2d7ff9", "icon": "bulb", "state": 1 }
+    { "id": 0, "label": "Facade",  "color": "#9b59b6", "icon": "bulb", "mode": "toggle", "state": 1 },
+    { "id": 1, "label": "Portail", "color": "#2d7ff9", "icon": "gate", "mode": "action", "state": null }
   ]
 }
 ```
@@ -116,23 +158,31 @@ curl -s -H "X-GLOWSCREEN32-APIKEY: <clé>" \
 `version` est **propre à chaque écran** : modifier la configuration du salon ne
 force pas la cuisine à recharger. `poll` est l'intervalle conseillé, en
 secondes. `state` vaut `0`, `1`, ou `null` quand la notion n'a pas de sens.
+`mode` vaut `"toggle"` ou `"action"`, et `id` est le rang du bouton.
 
 ### `action=press` — déclencher un bouton
 
 ```bash
 curl -s -H "X-GLOWSCREEN32-APIKEY: <clé>" \
-  "http://<box>/plugins/glowscreen32/core/php/api.php?action=press&device=246f28123456&id=12"
+  "http://<box>/plugins/glowscreen32/core/php/api.php?action=press&device=246f28123456&id=0"
 ```
 
 ```json
-{ "ok": true, "id": 12, "state": 0 }
+{ "ok": true, "id": 0, "state": 1, "pending": true }
 ```
 
-`state` est l'état **après** exécution, pour que la carte mette le bouton à jour
-sans recharger toute la mise en page.
+`id` est le **rang** reçu dans `layout`, pas un identifiant de commande.
 
-L'identifiant est cherché parmi les boutons de **cet écran-là**, jamais dans
-toute l'installation : une carte ne peut déclencher que ce qu'on lui a confié.
+`state` est l'état **attendu** après exécution — en mode interrupteur, l'inverse
+de l'état lu juste avant. `pending` dit qu'il n'est pas encore confirmé : sur du
+matériel réel, la valeur remonte après un aller-retour avec l'équipement, et au
+moment où `press` répond le relais vient de basculer mais Jeedom n'a pas encore
+reçu la nouvelle valeur. Le firmware s'en sert pour un retour visuel optimiste
+immédiat ; la **source de vérité reste le `states` du `ping` suivant**.
+
+Le rang est cherché dans la mise en page de **cet écran-là**, jamais dans toute
+l'installation : une carte ne peut déclencher que ce qu'on lui a confié. Un rang
+hors de la mise en page vaut `unknown_button`.
 
 ### `action=ping` — vérifier la liaison
 
@@ -170,14 +220,14 @@ Un écran **désactivé** répond `unknown_device` : désactiver un équipement 
 Jeedom doit couper ce qu'il commande, pas le laisser déclencher des actions
 depuis un mur.
 
-### Les scénarios et le champ `id`
+### Les scénarios
 
-Le contrat définit `id` comme l'identifiant de la commande Jeedom à déclencher,
-et ne prévoit rien pour un scénario. Un bouton qui lance un scénario porte donc
-l'**opposé** de l'identifiant du scénario : `-7` pour le scénario 7. Un entier
-négatif n'entre en collision avec aucun identifiant de commande, et `press` sait
-le relire. Le firmware n'a rien de particulier à faire : il renvoie l'entier
-qu'on lui a donné.
+Un bouton peut lancer un scénario au lieu d'une commande : c'est un bouton en
+mode **Action simple** dont la cible est un scénario. Depuis la v1.3 du contrat
+cela ne demande plus aucune convention particulière — `id` étant un rang, un
+bouton-scénario porte un rang comme les autres, et le firmware n'a rien à savoir
+de ce qu'il déclenche. La convention de l'identifiant négatif de la v1.0 n'a
+plus de raison d'être et a disparu.
 
 ## Les commandes de l'équipement
 
@@ -191,10 +241,21 @@ ordinaire sur le dashboard, et qu'un scénario puisse réagir à un appui.
 | Dernier contact | horodaté à chaque appel reçu, `layout` comme `ping` |
 | Dernier bouton | le libellé du dernier bouton appuyé |
 
-**Dernier contact** est la façon de savoir si un écran est en ligne : un écran
-qui n'apparaît plus depuis plus longtemps que son intervalle de rafraîchissement
-ne répond plus. La page de configuration du plugin en fait un tableau, avec la
-MAC et la version de chaque écran.
+**Dernier contact** est la façon de savoir si un écran est en ligne. Il est
+écrit à deux endroits : la commande d'information ci-dessus, et la
+**configuration de l'équipement** (`getConfiguration('lastcontact')`), qui est
+la source que le plugin consulte lui-même. La version 1.0 ne l'écrivait que dans
+la commande, si bien que la configuration restait vide sur un écran qui
+dialoguait pourtant parfaitement.
+
+Il est arrondi **à la minute**, et c'est délibéré : une carte interroge toutes
+les trente secondes, et horodater chaque appel ferait une écriture en base par
+écran et par demi-minute pour une information dont personne ne lit la seconde.
+Un appui, lui, est rare et intéressant : il est toujours écrit.
+
+La page du plugin l'affiche en clair — « 22/09/2026 11:20:07 (il y a 2 min) » —
+dans l'onglet Écran et dans le tableau du parc, avec une étiquette **hors
+ligne** au-delà de trois intervalles de rafraîchissement sans nouvelle.
 
 ## Journal
 

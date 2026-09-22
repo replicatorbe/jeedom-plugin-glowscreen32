@@ -17,11 +17,16 @@
 
 /*
  * Le point d'entrée des écrans ESP32. Il met en oeuvre, à la lettre, le contrat
- * d'API v1.1 (docs/fr_FR/index.md) :
+ * d'API v1.3 (docs/fr_FR/index.md) :
  *
  *   GET ?action=layout&device=246f28123456     → la mise en page
- *   GET ?action=press&device=…&id=12           → jouer un bouton
+ *   GET ?action=press&device=…&id=0            → jouer le bouton de RANG 0
  *   GET ?action=ping&device=…                  → le compteur de version
+ *
+ * Depuis la v1.3, « id » est le RANG du bouton dans la mise en page (0 à 5) et
+ * non un identifiant de commande Jeedom : la carte ne désigne plus ce qui doit
+ * s'exécuter, elle désigne le bouton qu'on a touché. C'est le plugin qui en
+ * déduit la commande, et son sens.
  *
  *   X-GLOWSCREEN32-APIKEY: <clé>               → l'authentification normale
  *
@@ -156,21 +161,30 @@ try {
     /* --- press ------------------------------------------------------------ */
 
     $id = init('id');
-    /* « 0 » n'est l'identifiant d'aucune commande, et init() rend une chaîne
-     * vide sur un paramètre absent : les deux sont des requêtes mal formées et
-     * non des boutons inconnus. */
-    if ($id === '' || !is_numeric($id) || (int) $id === 0) {
+    /*
+     * Un paramètre absent ou non numérique est une requête MAL FORMÉE : le
+     * firmware a un défaut, et le réessayer trois fois avec backoff n'y changera
+     * rien. Un rang bien formé mais hors de la mise en page est autre chose —
+     * une carte qui a gardé en cache une mise en page devenue plus courte — et
+     * le contrat lui réserve « unknown_button », que press() rend par null.
+     *
+     * Le rang 0 est le PREMIER bouton, et non plus une valeur illégale comme
+     * l'était l'identifiant de commande 0 jusqu'en v1.2.
+     */
+    if ($id === '' || !is_numeric($id)) {
         glowscreen32ApiError('bad_request', 400, __('paramètre id absent ou invalide', __FILE__));
     }
 
     $result = $eqLogic->press($id);
     if ($result === null) {
         glowscreen32ApiError('unknown_button', 404, sprintf(
-            __('%1$s : aucun bouton d\'identifiant %2$s', __FILE__), $eqLogic->getHumanName(), (int) $id));
+            __('%1$s : aucun bouton de rang %2$s dans la mise en page', __FILE__),
+            $eqLogic->getHumanName(), (int) $id));
     }
 
-    log::add('glowscreen32', 'info', sprintf(
-        __('%1$s : appui sur le bouton %2$s.', __FILE__), $eqLogic->getHumanName(), (int) $id));
+    /* L'appui est journalisé par press(), qui est le seul à savoir quelle
+     * commande il a finalement choisie — l'information qui compte quand un
+     * interrupteur part dans le mauvais sens. */
     glowscreen32ApiSend(200, $result);
 
 } catch (Throwable $e) {
