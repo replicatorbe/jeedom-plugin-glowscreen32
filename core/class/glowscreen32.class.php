@@ -78,6 +78,17 @@ class glowscreen32 extends eqLogic {
      * sans que rien, côté serveur, ne dise pourquoi. */
     const MAX_PAYLOAD = 8192;
 
+    /*
+     * Âge maximal, en MINUTES, d'une valeur affichable au bandeau. 0 = ne
+     * jamais périmer.
+     *
+     * Réglable par écran, et il le faut : les capteurs n'ont pas tous la même
+     * cadence — une station météo se rafraîchit toutes les dix minutes, un
+     * compteur d'énergie toutes les secondes, un thermostat tous les quarts
+     * d'heure. Un seuil unique en dur serait forcément faux pour quelqu'un.
+     */
+    const DEFAULT_INFO_MAX_AGE = 60;
+
     /* Longueurs du contrat. */
     const LABEL_MAX = 24;
     const TITLE_MAX = 24;
@@ -636,6 +647,74 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
+     * Le seuil de péremption du bandeau, en SECONDES. 0 = jamais.
+     *
+     * Une clé absente vaut le défaut, et non zéro : un écran configuré avant
+     * que le réglage n'existe doit hériter d'un garde-fou, pas de son absence.
+     * Un champ laissé vide est traité de la même façon — « vide » veut dire
+     * « je n'ai pas choisi », alors que « 0 » est un choix explicite.
+     */
+    public function infoMaxAge() {
+        $raw = $this->getConfiguration('info_max_age', self::DEFAULT_INFO_MAX_AGE);
+        if (trim((string) $raw) === '' || !is_numeric($raw)) {
+            $minutes = self::DEFAULT_INFO_MAX_AGE;
+        } else {
+            $minutes = (int) $raw;
+        }
+        if ($minutes < 0) {
+            $minutes = self::DEFAULT_INFO_MAX_AGE;
+        }
+        return $minutes * 60;
+    }
+
+    /*
+     * L'âge de la valeur d'une commande d'information, en secondes, ou null si
+     * elle n'est pas datée.
+     *
+     * ⚠ C'est « collectDate » qu'il faut lire, PAS « valueDate ».
+     *
+     * Le coeur met « valueDate » à jour uniquement quand la valeur CHANGE,
+     * alors que « collectDate » l'est à chaque COLLECTE. Une température stable
+     * à 18 °C depuis deux heures a donc une « valueDate » vieille de deux
+     * heures tout en étant parfaitement fraîche : s'y fier masquerait des
+     * valeurs valides, c'est-à-dire le défaut exactement symétrique de celui
+     * qu'on corrige. Constaté sur la commande météo de cette installation, à
+     * l'instant où le réglage a été écrit : collectDate 1 minute, valueDate 81.
+     *
+     * Le repli sur « valueDate » ne sert qu'aux commandes qu'aucun collecteur
+     * n'horodate. Et si les deux sont vides, la valeur est réputée UTILISABLE :
+     * périmer faute de date casserait un cas qui fonctionne aujourd'hui.
+     */
+    public static function cmdAge($_cmd) {
+        $stamp = trim((string) $_cmd->getCollectDate());
+        if ($stamp === '') {
+            $stamp = trim((string) $_cmd->getValueDate());
+        }
+        if ($stamp === '') {
+            return null;
+        }
+        $time = strtotime($stamp);
+        return ($time === false) ? null : max(0, time() - $time);
+    }
+
+    /* Une durée lisible d'un coup d'oeil dans le journal : « 2 h 15 min » se
+     * comprend, « 8100 » se calcule. */
+    public static function humanDuration($_seconds) {
+        $seconds = max(0, (int) $_seconds);
+        if ($seconds < 60) {
+            return sprintf(__('%s s', __FILE__), $seconds);
+        }
+        if ($seconds < 3600) {
+            return sprintf(__('%s min', __FILE__), (int) floor($seconds / 60));
+        }
+        if ($seconds < 86400) {
+            return sprintf(__('%1$s h %2$s min', __FILE__),
+                (int) floor($seconds / 3600), (int) floor(($seconds % 3600) / 60));
+        }
+        return sprintf(__('%s j', __FILE__), (int) floor($seconds / 86400));
+    }
+
+    /*
      * Le texte du bandeau — contrat v2.0.
      *
      * C'est le PLUGIN qui formate : il connaît la commande choisie, son unité
@@ -660,6 +739,34 @@ class glowscreen32 extends eqLogic {
         }
         if (!is_object($cmd) || $cmd->getType() != 'info') {
             return null;
+        }
+
+        /*
+         * La péremption.
+         *
+         * Un bandeau vide est honnête ; un bandeau qui affiche une température
+         * d'hier comme si elle était actuelle ne l'est pas — et c'est pire
+         * qu'inutile sur un panneau mural qu'on consulte d'un coup d'oeil en
+         * passant. Le cas s'est présenté : la commande météo choisie n'avait
+         * jamais été collectée, son cron ne tournant pas.
+         *
+         * ⚠ Ceci ne fait PAS bouger « version », et ne doit pas : « version »
+         * ne suit que la CONFIGURATION. Une valeur qui périme est un changement
+         * d'ÉTAT, et il se propage par le champ « info » du ping, exactement
+         * comme « states ». Sinon chaque péremption ferait recharger toute la
+         * mise en page au parc entier — pour un écran qui afficherait la même
+         * chose, à un champ près.
+         */
+        $maxAge = $this->infoMaxAge();
+        if ($maxAge > 0) {
+            $age = self::cmdAge($cmd);
+            if ($age !== null && $age > $maxAge) {
+                log::add('glowscreen32', 'info', sprintf(
+                    __('%1$s : la valeur du bandeau « %2$s » date de %3$s, au-delà du seuil de %4$s minutes : le bandeau reste vide plutôt que d\'afficher une valeur périmée. Vérifiez que la collecte de cette commande tourne encore.', __FILE__),
+                    $this->getHumanName(), $cmd->getHumanName(),
+                    self::humanDuration($age), (int) ($maxAge / 60)));
+                return null;
+            }
         }
 
         $value = $cmd->execCmd();
@@ -1586,6 +1693,9 @@ class glowscreen32 extends eqLogic {
              * l'écran à chaque degré serait absurde — « info » voyage dans le
              * ping, comme « states ». */
             'info'    => trim((string) $this->getConfiguration('info_cmd', '')),
+            /* Le SEUIL, pas l'âge : le seuil est de la configuration, l'âge est
+             * de l'état. Le premier doit faire redessiner, le second jamais. */
+            'infoage' => $this->infoMaxAge(),
         )));
     }
 
@@ -2293,6 +2403,9 @@ class glowscreen32 extends eqLogic {
         $this->setConfiguration('grid', $this->grid());
         $this->setConfiguration('swipe', $this->swipe() ? 1 : 0);
         $this->setConfiguration('clock', $this->clock() ? 1 : 0);
+        /* Remis en minutes entières : ce qui est relu est ce qui est écrit, et
+         * un champ laissé vide retombe sur le défaut plutôt que sur zéro. */
+        $this->setConfiguration('info_max_age', (int) ($this->infoMaxAge() / 60));
 
         /* Le nombre de boutons par page, contrôlé APRÈS la mise en forme —
          * c'est elle qui décide de la page de chacun. */

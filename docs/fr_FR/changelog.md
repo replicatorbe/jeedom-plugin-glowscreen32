@@ -31,6 +31,16 @@ publié.
   (arrondie, avec son unité, seize caractères au plus), plus une horloge
   facultative calée sur l'heure du serveur. Le décalage horaire est calculé
   depuis le fuseau de Jeedom, **heure d'été comprise** — pas de valeur en dur.
+- **Une valeur de bandeau trop vieille n'est pas affichée** : le champ `info`
+  vaut alors `null`, et le journal dit l'écran, la commande et l'âge réel. Seuil
+  réglable par écran (`info_max_age`), **60 minutes par défaut, 0 pour ne jamais
+  périmer** — les capteurs n'ont pas tous la même cadence. Le cas s'est
+  présenté : la commande météo choisie n'avait jamais été collectée, son cron ne
+  tournant pas, et l'écran aurait affiché la même température indéfiniment.
+  C'est la date de **collecte** qui est lue, pas celle du dernier changement de
+  valeur : une température stable à 18 °C depuis deux heures est fraîche, et se
+  fier à `valueDate` l'aurait effacée à tort. La péremption ne fait **pas**
+  bouger `version` — c'est un changement d'état, il voyage dans le `ping`.
 - **Vocabulaire d'icônes fermé, et une table d'alias.** `icon` devient une liste
   déroulante : le firmware convertit le nom en identifiant numérique au parsing
   et ne sait dessiner que ceux qu'il connaît. Un champ libre laissait configurer

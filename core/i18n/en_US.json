@@ -61,7 +61,12 @@
         "Mise en page tronquée : plus de %s boutons enregistrés, les suivants sont ignorés.": "Layout truncated: more than %s buttons stored, the rest are ignored.",
         "Page %1$s, case %2$s": "Page %1$s, slot %2$s",
         "Page %s": "Page %s",
-        "%1$s : l'icône « %2$s » du bouton « %3$s » n'existe pas et n'a pas d'équivalent connu ; la tuile s'affichera sans icône. Choisissez-en une dans la liste.": "%1$s: icon \"%2$s\" of button \"%3$s\" does not exist and has no known equivalent; the tile will show without an icon. Pick one from the list."
+        "%1$s : l'icône « %2$s » du bouton « %3$s » n'existe pas et n'a pas d'équivalent connu ; la tuile s'affichera sans icône. Choisissez-en une dans la liste.": "%1$s: icon \"%2$s\" of button \"%3$s\" does not exist and has no known equivalent; the tile will show without an icon. Pick one from the list.",
+        "%1$s : la valeur du bandeau « %2$s » date de %3$s, au-delà du seuil de %4$s minutes : le bandeau reste vide plutôt que d'afficher une valeur périmée. Vérifiez que la collecte de cette commande tourne encore.": "%1$s: the banner value \"%2$s\" is %3$s old, beyond the %4$s minute threshold: the banner stays empty rather than showing a stale value. Check that this command is still being collected.",
+        "%s s": "%s s",
+        "%s min": "%s min",
+        "%1$s h %2$s min": "%1$s h %2$s min",
+        "%s j": "%s d"
     },
     "plugins/glowscreen32/core/php/api.php": {
         "API : %1$s (HTTP %2$s) depuis %3$s%4$s": "API: %1$s (HTTP %2$s) from %3$s%4$s",
@@ -235,7 +240,9 @@
         "octets": "bytes",
         "ouvert": "open",
         "À coller dans un terminal pour vérifier la liaison sans la carte.": "To paste in a terminal to check the link without the board.",
-        "Chaque bouton porte un libellé, une couleur, une icône et un mode. En « Action simple », l'appui joue toujours la même commande — c'est ce qu'il faut pour un portail ou un scénario. En « Interrupteur », le plugin lit l'état et joue la commande inverse : un appui allume, le suivant éteint. En « Navigation », le bouton ouvre une autre page : il ne commande rien du tout, et la carte y répond elle-même, sans réseau.": "Each button carries a label, a colour, an icon and a mode. In \"Plain action\" a press always plays the same command — that is what a gate or a scenario needs. In \"Switch\" the plugin reads the state and plays the opposite command: one press turns on, the next turns off. In \"Navigation\" the button opens another page: it commands nothing at all, and the board answers it by itself, without the network."
+        "Chaque bouton porte un libellé, une couleur, une icône et un mode. En « Action simple », l'appui joue toujours la même commande — c'est ce qu'il faut pour un portail ou un scénario. En « Interrupteur », le plugin lit l'état et joue la commande inverse : un appui allume, le suivant éteint. En « Navigation », le bouton ouvre une autre page : il ne commande rien du tout, et la carte y répond elle-même, sans réseau.": "Each button carries a label, a colour, an icon and a mode. In \"Plain action\" a press always plays the same command — that is what a gate or a scenario needs. In \"Switch\" the plugin reads the state and plays the opposite command: one press turns on, the next turns off. In \"Navigation\" the button opens another page: it commands nothing at all, and the board answers it by itself, without the network.",
+        "Valeur périmée": "Stale value",
+        "Ignorer la valeur si elle date de plus de ce nombre de MINUTES, et laisser le bandeau vide. 60 par défaut, <b>0 pour ne jamais périmer</b>. Un bandeau vide est honnête ; une température d'hier affichée comme si elle était actuelle ne l'est pas, et c'est pire qu'inutile sur un panneau qu'on consulte d'un coup d'œil en passant. Le seuil dépend du capteur : une station météo se rafraîchit toutes les dix minutes, un compteur d'énergie toutes les secondes. C'est la date de COLLECTE qui est lue, pas celle du dernier changement de valeur — une température stable n'est pas une température périmée.": "Ignore the value if it is older than this many MINUTES, and leave the banner empty. 60 by default, <b>0 to never expire</b>. An empty banner is honest; yesterday's temperature shown as if it were current is not, and that is worse than useless on a panel glanced at in passing. The threshold depends on the sensor: a weather station refreshes every ten minutes, an energy meter every second. It is the COLLECTION date that is read, not the date of the last value change — a stable temperature is not a stale one."
     },
     "plugins/glowscreen32/desktop/js/glowscreen32.js": {
         "Bouton": "Button",

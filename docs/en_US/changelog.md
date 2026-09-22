@@ -30,6 +30,16 @@ negotiation**, without which none of it could have been published.
   (rounded, with its unit, sixteen characters at most), plus an optional clock
   based on server time. The time offset is computed from Jeedom's timezone,
   **daylight saving included** — no hard-coded value.
+- **A banner value that is too old is not displayed**: the `info` field is then
+  `null`, and the log names the screen, the command and the real age. Threshold
+  set per screen (`info_max_age`), **60 minutes by default, 0 to never expire** —
+  sensors do not all refresh at the same pace. The case came up: the weather
+  command chosen had never been collected, its cron not running, and the screen
+  would have shown the same temperature forever. It is the **collection** date
+  that is read, not the date of the last value change: a temperature stable at
+  18 °C for two hours is fresh, and relying on `valueDate` would have wiped it
+  wrongly. Expiry does **not** move `version` — it is a state change, it travels
+  in the `ping`.
 - **Closed icon vocabulary, plus an alias table.** `icon` becomes a drop-down
   list: the firmware turns the name into a numeric id at parse time and can only
   draw the ones it knows. A free-text field allowed icons to be configured that

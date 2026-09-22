@@ -456,6 +456,15 @@ $gsFirmware = $gsOta['firmware'];
 									<span class="help-block" style="margin:0;">{{Une température, une humidité, une puissance : la valeur est formatée ICI — arrondie, avec son unité, seize caractères au plus — et la carte ne fait que l'afficher. Elle voyage dans le « ping », elle ne fait donc pas redessiner l'écran à chaque degré.}}</span>
 								</div>
 							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Valeur périmée}}</label>
+								<div class="col-sm-2">
+									<input type="number" min="0" max="10080" step="1" class="eqLogicAttr form-control" data-l1key="configuration" data-l2key="info_max_age" placeholder="60">
+								</div>
+								<div class="col-sm-7">
+									<span class="help-block" style="margin:0;">{{Ignorer la valeur si elle date de plus de ce nombre de MINUTES, et laisser le bandeau vide. 60 par défaut, <b>0 pour ne jamais périmer</b>. Un bandeau vide est honnête ; une température d'hier affichée comme si elle était actuelle ne l'est pas, et c'est pire qu'inutile sur un panneau qu'on consulte d'un coup d'œil en passant. Le seuil dépend du capteur : une station météo se rafraîchit toutes les dix minutes, un compteur d'énergie toutes les secondes. C'est la date de COLLECTE qui est lue, pas celle du dernier changement de valeur — une température stable n'est pas une température périmée.}}</span>
+								</div>
+							</div>
 						</fieldset>
 
 						<fieldset>

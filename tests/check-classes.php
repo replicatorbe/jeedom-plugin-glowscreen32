@@ -305,6 +305,55 @@ if (preg_match('/function layoutV2.*?\n    \}/s', $source, $methode)) {
     }
 }
 
+/* --- La fraîcheur de la valeur du bandeau -------------------------------
+ * C'est « collectDate » qu'il faut lire, PAS « valueDate ». Le coeur ne met
+ * « valueDate » à jour que quand la valeur CHANGE : une température stable à
+ * 18 °C depuis deux heures a une « valueDate » vieille de deux heures tout en
+ * étant parfaitement fraîche. S'y fier masquerait des valeurs valides — le
+ * défaut exactement symétrique de celui qu'on corrige, et tout aussi
+ * silencieux. Constaté sur cette installation : collectDate 1 minute,
+ * valueDate 81 minutes, sur la même commande et au même instant. */
+if (preg_match('/function cmdAge.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'getCollectDate()') === false) {
+        $echecs[] = 'cmdAge() ne lit pas getCollectDate() : la fraîcheur du bandeau serait '
+                  . 'jugée sur la date du dernier CHANGEMENT de valeur, et une valeur stable '
+                  . 'mais fraîche serait déclarée périmée.';
+    }
+    $collect = strpos($methode[0], 'getCollectDate()');
+    $value   = strpos($methode[0], 'getValueDate()');
+    if ($value !== false && $collect !== false && $value < $collect) {
+        $echecs[] = 'cmdAge() consulte getValueDate() AVANT getCollectDate() : ce n\'est plus '
+                  . 'un repli, c\'est la source principale.';
+    }
+} else {
+    $echecs[] = 'cmdAge() est introuvable : plus rien ne périme une valeur de bandeau, et un '
+              . 'écran afficherait indéfiniment la température d\'hier.';
+}
+if (preg_match('/function infoText.*?\n    \}/s', $source, $methode)) {
+    foreach (array('infoMaxAge()', 'cmdAge(') as $attendu) {
+        if (strpos($methode[0], $attendu) === false) {
+            $echecs[] = 'infoText() n\'appelle pas ' . $attendu . ' : la valeur du bandeau '
+                      . 'serait servie sans contrôle de fraîcheur.';
+        }
+    }
+} else {
+    $echecs[] = 'infoText() est introuvable.';
+}
+/* Le seuil est de la CONFIGURATION : le modifier doit faire redessiner. L'âge,
+ * lui, est de l'ÉTAT et ne doit jamais entrer dans la signature — sinon chaque
+ * péremption rechargerait toute la mise en page du parc. */
+if (preg_match('/function layoutSignature.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'infoMaxAge()') === false) {
+        $echecs[] = 'layoutSignature() ne tient pas compte du seuil de péremption du '
+                  . 'bandeau : le modifier ne ferait pas bouger « version ».';
+    }
+    if (strpos($methode[0], 'cmdAge(') !== false || strpos($methode[0], 'infoText()') !== false) {
+        $echecs[] = 'layoutSignature() consulte l\'ÂGE ou la VALEUR du bandeau : « version » '
+                  . 'bougerait toute seule, et chaque péremption ferait recharger la mise en '
+                  . 'page à tout le parc.';
+    }
+}
+
 /* --- L'aplatissement du schéma 1 ------------------------------------------
  * Les boutons « nav » doivent en être exclus : une carte v1.4 ne connaît que
  * « action » et « toggle », et dessinerait une tuile qui, à l'appui, recevrait
