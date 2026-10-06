@@ -67,6 +67,9 @@ function glowscreen32_update() {
          * recalcul périodique — cinq secondes au lieu d'une.
          */
         $eqLogic->updateListener();
+        /* v3.2 : la liste des pages des commandes « Afficher / Masquer /
+         * N'afficher que la page », et l'information « Pages affichées ». */
+        $eqLogic->refreshPageCommands();
     }
 }
 

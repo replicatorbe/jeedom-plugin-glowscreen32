@@ -167,6 +167,17 @@ values, after 60 min without collection (configurable). Schema 3 `ping` adds
 schema; a `press` on a value tile answers `unknown_button`. The same button has
 different `id`s in different schemas.
 
+### Shown pages — 3.2
+
+Each page has a **"Show page"** checkbox (Buttons tab). A hidden page stays
+configured but is not sent to the screen: following pages are renumbered,
+navigation buttons to it disappear, and hiding the first page makes the screen
+start on the next. At least one page always stays shown. Scenario commands:
+**Show page**, **Hide page**, **Show only page** (list "position — title"),
+**Show all pages**, and the **Shown pages** info. The remote **Page** command
+names a configuration position, translated at delivery; it does nothing if that
+page is hidden.
+
 ## Over-the-air firmware updates
 
 `GET ...core/php/api.php?action=firmware&device=246f28123456&fw=1.3.0` answers

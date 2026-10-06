@@ -178,6 +178,25 @@ if (strpos((string) @file_get_contents(__DIR__ . '/../.deployignore'), 'data/sec
     $echecs[] = '.deployignore n\'exclut pas data/secrets/ : un déploiement effacerait (ou publierait) les mots de passe en attente.';
 }
 
+/* --- v3.2 (contrat v3.1) : pages masquables ------------------------------
+ * Les pages masquées ne sont pas servies, les visibles sont renumérotées, un
+ * « nav » vers une page masquée est retiré, et il reste toujours une page. */
+foreach (array('pageMap', 'servedParent', 'servedTitle', 'applyPageVisibility', 'refreshPageCommands',
+               "'page_show'", "'page_hide'", "'page_only'", "'page_all'", "'pages_visible'") as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : les pages masquables du contrat v3.1 ne sont plus mises en oeuvre.';
+    }
+}
+if (preg_match('/function activeButtons\(.*?\n    \}/s', $source, $methode) && strpos($methode[0], 'pageMap()') === false) {
+    $echecs[] = 'activeButtons() ne tient plus compte des pages masquées : leurs boutons seraient servis et numérotés.';
+}
+if (preg_match('/function dequeueCommand\(.*?\n    \}/s', $source, $methode) && strpos($methode[0], 'pageMap()') === false) {
+    $echecs[] = 'dequeueCommand() ne traduit plus la position de page en numéro servi.';
+}
+if (strpos($source, 'Au moins une page doit rester affichée') === false) {
+    $echecs[] = 'preSave() ne refuse plus une configuration sans page visible.';
+}
+
 /* --- Le double verrou d'OTA du contrat v1.4 --------------------------------
  * C'est le point de sécurité du plugin : deux verrous indépendants, fermés par
  * défaut, tous deux côté serveur. Un refactoring qui en perdrait un laisserait

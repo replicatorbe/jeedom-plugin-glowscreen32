@@ -49,6 +49,16 @@ try {
      * commande a été supprimée disparaît de la mise en page sans que le
      * formulaire, lui, ait changé d'apparence.
      */
+    $pageInfo = function ($_eqLogic) {
+        $map = $_eqLogic->pageMap();
+        $out = array();
+        foreach ($_eqLogic->pages() as $id => $page) {
+            $out[] = array('position' => $id, 'title' => $page['title'], 'visible' => isset($map[$id]),
+                           'served' => isset($map[$id]) ? $map[$id] : null);
+        }
+        return $out;
+    };
+
     $idMap = function ($_eqLogic, $_schema) {
         $map = array();
         foreach ($_eqLogic->buttonsFor($_schema) as $id => $button) {
@@ -101,6 +111,9 @@ try {
             /* v3.1 : la correspondance id → libellé de CHAQUE schéma. Un même
              * bouton n'a pas le même id d'un schéma à l'autre ; la montrer
              * évite d'essayer le mauvais bouton au curl. */
+            /* v3.2 : chaque page configurée, sa visibilité, et le numéro sous
+             * lequel elle est SERVIE (null si masquée). */
+            'pages'  => $pageInfo($eqLogic),
             'ids'    => array(
                 3 => $idMap($eqLogic, glowscreen32::SCHEMA_CURRENT),
                 2 => $idMap($eqLogic, glowscreen32::SCHEMA_V2),

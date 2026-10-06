@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.2
+
+Pages masquables (contrat v3.1). **Le schéma ne change pas, le firmware non
+plus** : une page masquée est simplement absente de la réponse `layout`.
+
+- Case **« Afficher la page »** par page (onglet Boutons). Une configuration
+  existante reste entièrement visible. Au moins une page doit rester affichée :
+  l'interface et l'enregistrement refusent de tout masquer.
+- Les pages masquées sont omises, les visibles **renumérotées** 0 … n-1 dans
+  leur ordre de configuration (masquer la première fait démarrer l'écran sur la
+  suivante). Un `parent` masqué est remplacé par le plus proche ancêtre visible,
+  à défaut la page 0 ; un bouton de navigation vers une page masquée est
+  retiré ; les `id` sont recalculés sur ce qui est servi, dans les schémas 1, 2
+  et 3.
+- Changer la visibilité change `version` : la carte recharge sa mise en page.
+  Le refus d'un `press` dont le bouton a changé depuis le dernier `layout`
+  servi couvre l'instant de transition.
+- Commandes pour les scénarios : **Afficher la page**, **Masquer la page**,
+  **N'afficher que la page** (liste des pages « position — titre »), **Afficher
+  toutes les pages**, et l'information **Pages affichées**. Elles relisent
+  l'équipement juste avant d'écrire et ne modifient que la visibilité ;
+  masquer la dernière page visible est refusé et journalisé.
+- La commande à distance `page` reçoit la position de configuration et la
+  traduit en numéro servi au moment de la livraison ; vers une page masquée,
+  elle est sans effet (journalisé).
+- « Voir ce que la carte reçoit » et l'aperçu de la grille montrent les pages
+  masquées comme telles.
+
 ## 3.1
 
 Corrections issues d'une revue complète. Le schéma ne change pas.

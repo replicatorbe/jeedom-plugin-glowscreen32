@@ -383,7 +383,9 @@ function glowscreen32ResetModel(_configuration) {
     var page = (Array.isArray(pages) && isset(pages[p])) ? pages[p] : {}
     var parent = parseInt(init(page.parent, 0), 10)
     if (isNaN(parent) || parent < 0 || parent >= GLOWSCREEN32_LIMITS.pages || parent === p) { parent = 0 }
-    glowscreen32Model.pages.push({ title: init(page.title, ''), parent: parent })
+    /* v3.2 : « Afficher la page ». Absent = visible (configuration antérieure). */
+    var visible = !(page.visible === false || page.visible === 0 || page.visible === '0')
+    glowscreen32Model.pages.push({ title: init(page.title, ''), parent: parent, visible: visible })
   }
 
   var buttons = init(configuration.buttons, [])
@@ -746,6 +748,8 @@ function glowscreen32RenderPageTabs() {
     link.className = 'glowscreen32PageTab'
     link.setAttribute('data-gs-page', String(page))
     link.textContent = glowscreen32PageName(page) + (count > 0 ? ' (' + count + ')' : '')
+      + (glowscreen32PageShown(page) ? '' : ' — {{masquée}}')
+    if (!glowscreen32PageShown(page)) { link.style.opacity = '.55' }
     li.appendChild(link)
     tabs.appendChild(li)
   }
@@ -779,6 +783,13 @@ function glowscreen32RenderPageHeader() {
   } else {
     html += '<div class="col-sm-5"><span class="help-block" style="margin:0;">{{La page 0 est la page d\'accueil : c\'est celle que la carte affiche au démarrage, et elle n\'a pas de page parente. À défaut de titre, le nom de l\'écran s\'affiche au bandeau.}}</span></div>'
   }
+  html += '</div>'
+  /* v3.2 : « Afficher la page ». Masquée, elle reste configurée mais n'est
+     pas servie à l'écran ; au moins une page doit rester affichée. */
+  html += '<div class="form-group" style="margin:0 0 10px 0;">'
+  html += '<label class="col-sm-3 control-label">{{Afficher la page}}</label>'
+  html += '<div class="col-sm-1"><input type="checkbox" id="cb_glowscreen32PageVisible"' + (page.visible === false ? '' : ' checked') + '></div>'
+  html += '<div class="col-sm-8"><span class="help-block" style="margin:0;">{{Décochée, la page reste configurée mais n\'est pas envoyée à l\'écran : les pages suivantes sont renumérotées, les boutons de navigation qui y mènent disparaissent, et si c\'est la première page, l\'écran démarre sur la suivante. Au moins une page doit rester affichée. Un scénario peut aussi le faire : commandes « Afficher la page », « Masquer la page », « N\'afficher que la page ».}}</span></div>'
   html += '</div>'
   box.innerHTML = html
 
@@ -882,6 +893,10 @@ function glowscreen32CollectPage() {
     if (isNaN(value) || value < 0 || value >= GLOWSCREEN32_LIMITS.pages || value === glowscreen32Page) { value = 0 }
     glowscreen32Model.pages[glowscreen32Page].parent = value
   }
+  var shown = document.getElementById('cb_glowscreen32PageVisible')
+  if (shown !== null && isset(glowscreen32Model.pages[glowscreen32Page])) {
+    glowscreen32Model.pages[glowscreen32Page].visible = shown.checked
+  }
 
   var kept = []
   for (var i = 0; i < glowscreen32Model.buttons.length; i++) {
@@ -926,15 +941,28 @@ function glowscreen32ButtonDrawn(_button) {
  * hors grille vers la première case libre. Un aperçu qui numéroterait
  * autrement ferait essayer le mauvais bouton au curl.
  */
+/* v3.2 : la page est-elle affichée ? Même règle que le plugin, y compris le
+   repli « aucune page visible → la page 0 » (refusé à l'enregistrement). */
+function glowscreen32PageShown(_page) {
+  var any = false
+  for (var p = 0; p < glowscreen32Model.pages.length; p++) { if (glowscreen32Model.pages[p].visible !== false) { any = true } }
+  if (!any) { return _page === 0 }
+  return init(glowscreen32Model.pages[_page], {}).visible !== false
+}
+
 function glowscreen32Flatten() {
   var capacity = glowscreen32Capacity()
   var flat = []
   for (var page = 0; page < GLOWSCREEN32_LIMITS.pages; page++) {
+    /* Pages masquées : ni servies, ni numérotées (v3.2). */
+    if (!glowscreen32PageShown(page)) { continue }
     var taken = {}
     var placed = []
     var list = glowscreen32PageButtons(page)
     for (var i = 0; i < list.length; i++) {
       if (!glowscreen32ButtonDrawn(list[i])) { continue }
+      /* Un « nav » vers une page masquée est retiré, comme côté plugin. */
+      if (list[i].mode === 'nav' && list[i].nav >= 0 && !glowscreen32PageShown(list[i].nav)) { continue }
       var slot = list[i].slot
       if (slot >= capacity || isset(taken[slot])) {
         slot = -1
@@ -970,6 +998,17 @@ function glowscreen32RenderPreview() {
 
   var capacity = glowscreen32Capacity()
   var drawn = glowscreen32Flatten()
+  if (!glowscreen32PageShown(glowscreen32Page)) {
+    /* v3.2 : une page masquée n'est pas envoyée à l'écran — l'aperçu le dit
+       au lieu de dessiner une grille que la carte ne recevra jamais. */
+    var hidden = document.createElement('div')
+    hidden.className = 'glowscreen32Tile glowscreen32TileEmpty'
+    hidden.style.gridColumn = '1 / -1'
+    hidden.style.gridRow = '1 / -1'
+    hidden.textContent = '{{Page masquée : elle n\'est pas envoyée à l\'écran.}}'
+    grid.appendChild(hidden)
+    return
+  }
   var here = {}
   for (var i = 0; i < drawn.length; i++) {
     if (drawn[i].page === glowscreen32Page) { here[drawn[i].slot] = { button: drawn[i], id: i } }
@@ -1463,7 +1502,21 @@ glowscreen32Container.addEventListener('change', function (event) {
   /* Le titre d'une page et sa page parente : ils changent le nom des onglets et
      celui des listes de navigation, donc tout l'onglet est redessiné. */
   if (event.target.closest('#in_glowscreen32PageTitle')
-   || event.target.closest('#sel_glowscreen32PageParent')) {
+   || event.target.closest('#sel_glowscreen32PageParent')
+   || event.target.closest('#cb_glowscreen32PageVisible')) {
+    /* v3.2 : refuser ici de décocher la dernière page affichée — le plugin
+       le refuserait à l'enregistrement. */
+    if (event.target.closest('#cb_glowscreen32PageVisible') && !event.target.checked) {
+      var others = 0
+      for (var op = 0; op < glowscreen32Model.pages.length; op++) {
+        if (op !== glowscreen32Page && glowscreen32Model.pages[op].visible !== false) { others++ }
+      }
+      if (others === 0) {
+        event.target.checked = true
+        jeedomUtils.showAlert({ message: '{{Au moins une page doit rester affichée.}}', level: 'warning' })
+        return
+      }
+    }
     glowscreen32MarkModified()
     glowscreen32RenderPage()
     return
@@ -1632,8 +1685,14 @@ glowscreen32Container.addEventListener('click', function (event) {
             + (map[m].inert ? ' {{— INERTE : commande introuvable}}' : '') + (map[m].sensitive ? ' ⚠' : '') + '\n'
         }
       }
+      var pagesInfo = '// {{Pages (position de configuration → numéro servi) :}}\n'
+      var plist = init(result.pages, [])
+      for (var q = 0; q < plist.length; q++) {
+        pagesInfo += '//   {{page}} ' + (plist[q].position + 1) + ' « ' + (plist[q].title || '—') + ' » → '
+          + (plist[q].visible ? '{{servie comme}} ' + plist[q].served : '{{MASQUÉE, non servie}}') + '\n'
+      }
       payload.textContent = '// {{Correspondance id → bouton, par schéma : un même bouton n\'a pas le même id d\'un schéma à l\'autre.}}\n'
-        + ids + '\n'
+        + pagesInfo + ids + '\n'
         + '// X-GLOWSCREEN32-SCHEMA: 3\n'
         + JSON.stringify(result.layout, null, 2)
         + '\n\n// X-GLOWSCREEN32-SCHEMA: 2 — {{sans les tuiles « valeur », id recalculés}}\n'

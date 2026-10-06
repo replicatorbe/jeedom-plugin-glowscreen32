@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.2
+
+Hideable pages (contract 3.1). **No schema or firmware change**: a hidden page is
+simply absent from the `layout` answer.
+
+- **"Show page"** checkbox per page (Buttons tab). Existing configurations stay
+  fully visible. At least one page must stay shown: the page and the save both
+  refuse to hide them all.
+- Hidden pages are omitted and visible ones **renumbered** 0 … n-1 in
+  configuration order (hiding the first page makes the screen start on the
+  next). A hidden `parent` becomes the nearest visible ancestor, else page 0; a
+  navigation button to a hidden page is removed; `id`s are recomputed over what
+  is served, in schemas 1, 2 and 3.
+- Changing visibility changes `version`; the stale-layout `press` refusal covers
+  the transition.
+- Scenario commands: **Show page**, **Hide page**, **Show only page** (list of
+  "position — title"), **Show all pages**, and the **Shown pages** info. They
+  reload the device just before writing and only touch visibility; hiding the
+  last visible page is refused and logged.
+- The remote `page` command takes the configuration position and translates it
+  to the served number at delivery; towards a hidden page it does nothing
+  (logged).
+
 ## 3.1
 
 Fixes from a full review. The schema does not change.

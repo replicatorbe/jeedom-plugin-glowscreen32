@@ -127,6 +127,25 @@ Case de l'onglet Écran. L'écran affiche mais ne commande rien : la carte de
 schéma 3 n'envoie plus d'appui, et **le plugin refuse tout appui venant de cet
 écran**, quel que soit son firmware. La navigation reste possible.
 
+### Pages affichées — v3.2
+
+Chaque page porte une case **« Afficher la page »** (onglet Boutons). Masquée,
+elle reste configurée mais n'est pas envoyée à l'écran : les pages suivantes
+sont renumérotées, un bouton de navigation qui y mène disparaît, et si c'est la
+première page, l'écran démarre sur la suivante. Au moins une page reste
+toujours affichée. Le changement fait bouger la version : l'écran recharge sa
+mise en page dans la seconde, sans OTA.
+
+Les scénarios disposent des commandes **Afficher la page**, **Masquer la page**,
+**N'afficher que la page** (choix dans la liste « position — titre »),
+**Afficher toutes les pages**, et de l'information **Pages affichées** (titres
+des pages visibles). Exemple : « alarme armée → N'afficher que la page 3 —
+État ». Masquer la dernière page visible est refusé et journalisé.
+
+La commande à distance **Page** désigne une page par sa position de
+configuration ; elle est traduite au moment de la livraison, et reste sans effet
+si la page est masquée.
+
 ## Enrôler une carte neuve
 
 Une carte flashée mais pas encore déclarée reçoit `unknown_device` et **affiche

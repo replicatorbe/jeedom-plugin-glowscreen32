@@ -666,9 +666,67 @@ class glowscreen32 extends eqLogic {
             $pages[$id] = array(
                 'title'  => self::trimText(isset($raw['title']) ? $raw['title'] : '', self::TITLE_MAX),
                 'parent' => ($id === 0) ? 0 : $parent,
+                /* v3.2 (contrat v3.1) : « Afficher la page ». Absent = visible :
+                 * une configuration antérieure ne change pas. */
+                'visible' => !(isset($raw['visible']) && in_array($raw['visible'], array(0, '0', false, 'false'), true)),
             );
         }
         return $pages;
+    }
+
+    /*
+     * La correspondance position de CONFIGURATION → numéro SERVI des pages
+     * visibles — v3.2, contrat v3.1. Les pages masquées sont omises, les
+     * visibles renumérotées 0 … n-1 dans leur ordre de configuration : la page
+     * 0 servie est la première visible. Sans page masquée, c'est l'identité —
+     * la réponse d'un écran existant ne change pas d'un octet.
+     *
+     * Toujours au moins une page : si la configuration n'en marquait aucune
+     * visible (refusé à l'enregistrement, mais une restauration…), la page 0
+     * l'est.
+     */
+    public function pageMap() {
+        $map = array();
+        foreach ($this->pages() as $id => $page) {
+            if ($page['visible']) {
+                $map[$id] = count($map);
+            }
+        }
+        if (count($map) == 0) {
+            $map[0] = 0;
+        }
+        return $map;
+    }
+
+    public function pageVisible($_id) {
+        return isset($this->pageMap()[(int) $_id]);
+    }
+
+    /* Le parent SERVI d'une page : le plus proche ancêtre visible, à défaut la
+     * page 0 servie — le bouton retour ne mène jamais nulle part. */
+    public function servedParent($_id) {
+        $pages = $this->pages();
+        $map   = $this->pageMap();
+        $seen  = array((int) $_id => true);
+        $p     = $pages[(int) $_id]['parent'];
+        while (!isset($map[$p]) && !isset($seen[$p])) {
+            $seen[$p] = true;
+            $p = $pages[$p]['parent'];
+        }
+        return isset($map[$p]) ? $map[$p] : 0;
+    }
+
+    /* Le titre servi : celui saisi, à défaut le nom de l'écran pour l'accueil
+     * SERVI, « Page N » (numéro servi) sinon. Sans page masquée, c'est
+     * exactement pageTitle(). */
+    public function servedTitle($_id, $_served) {
+        $pages = $this->pages();
+        if ($pages[$_id]['title'] !== '') {
+            return $pages[$_id]['title'];
+        }
+        return ($_served === 0)
+            ? self::trimText($this->getName(), self::TITLE_MAX)
+            : sprintf(__('Page %s', __FILE__), $_served + 1);
     }
 
     /* Le titre affiché au bandeau pour cette page. À défaut de titre saisi, le
@@ -1507,9 +1565,21 @@ class glowscreen32 extends eqLogic {
         $incomplete = array();
         $overflow   = array();
 
+        $visible = $this->pageMap();
         foreach ($this->buttons() as $index => $button) {
             if (!self::buttonConfigured($button)) {
                 /* Une case laissée vide : rien à servir. */
+                continue;
+            }
+            /* v3.2 : une page masquée n'est pas servie, ni ses boutons ; un
+             * « nav » vers une page masquée est RETIRÉ — un bouton qui ne mène
+             * à rien est pire qu'une case vide. Ce n'est pas un bouton « non
+             * résolu » : c'est un changement de configuration, qui fait bouger
+             * « version » (signature), et la carte recharge sa mise en page. */
+            if (!isset($visible[$button['page']])) {
+                continue;
+            }
+            if ($button['mode'] === self::MODE_NAV && $button['nav'] >= 0 && !isset($visible[$button['nav']])) {
                 continue;
             }
             /*
@@ -1819,7 +1889,9 @@ class glowscreen32 extends eqLogic {
          * un bouton, et celles qu'un bouton « nav » vise — une page vide mais
          * atteignable reste une page, et la carte doit savoir l'afficher plutôt
          * que de rester sur un bouton qui ne fait rien. */
-        $used = array(0 => true);
+        $map   = $this->pageMap();
+        $home  = array_search(0, $map, true);
+        $used  = array($home => true);
         foreach ($active as $button) {
             $used[$button['page']] = true;
             if ($button['mode'] === self::MODE_NAV && empty($button['_inert'])) {
@@ -1865,7 +1937,8 @@ class glowscreen32 extends eqLogic {
                 'mode'  => ($button['mode'] === self::MODE_NAV && !empty($button['_inert'])) ? self::MODE_ACTION : $button['mode'],
             );
             if ($button['mode'] === self::MODE_NAV && empty($button['_inert'])) {
-                $entry['page'] = $button['nav'];
+                /* Le numéro SERVI de la page visée (v3.2). */
+                $entry['page'] = $map[$button['nav']];
             }
             $entry['state'] = $state;
             /* v3.0 : la valeur mise en forme et son sens, volatils (la carte
@@ -1882,16 +1955,19 @@ class glowscreen32 extends eqLogic {
         $this->noteValueCuts($cuts);
         $payload = array();
         for ($id = 0; $id < self::MAX_PAGES; $id++) {
-            if (!isset($used[$id])) {
+            if (!isset($used[$id]) || !isset($map[$id])) {
                 continue;
             }
+            /* v3.2 : numéro SERVI, titre et parent réécrits sur les seules
+             * pages visibles. */
+            $served = $map[$id];
             $page = array(
-                'id'    => $id,
-                'title' => $this->pageTitle($id),
+                'id'    => $served,
+                'title' => $this->servedTitle($id, $served),
             );
             /* Absent sur la page 0 : l'accueil n'a pas de « retour ». */
-            if ($id > 0) {
-                $page['parent'] = $pages[$id]['parent'];
+            if ($served > 0) {
+                $page['parent'] = $this->servedParent($id);
             }
             $page['buttons'] = isset($buttonsByPage[$id]) ? $buttonsByPage[$id] : array();
             $payload[] = $page;
@@ -2519,6 +2595,23 @@ class glowscreen32 extends eqLogic {
         if ($entry === null) {
             return null;
         }
+        /*
+         * v3.2 (contrat v3.1) : la commande « page » est mise en file avec la
+         * POSITION DE CONFIGURATION ; la carte attend le numéro SERVI. Traduit
+         * au moment de la livraison — une page masquée entre-temps rend la
+         * commande sans effet, journalisé.
+         */
+        if ($entry['cmd']['do'] === 'page') {
+            $map = $this->pageMap();
+            $position = (int) $entry['cmd']['page'];
+            if (!isset($map[$position])) {
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('%1$s : commande « page » (seq %2$s) vers la page %3$s, masquée — sans effet, elle n\'est pas livrée.', __FILE__),
+                    $this->getHumanName(), $entry['cmd']['seq'], $position + 1));
+                return null;
+            }
+            $entry['cmd']['page'] = $map[$position];
+        }
         if (!empty($entry['secret'])) {
             $secret = self::takeSecret($this->getId(), $entry['cmd']['seq']);
             if ($secret === null) {
@@ -2942,7 +3035,10 @@ class glowscreen32 extends eqLogic {
             'poll'    => $this->poll(),
             'buttons' => $buttons,
             /* --- contrat v2.0 --- */
-            'pages'   => $this->pages(),
+            /* Titre et parent seulement : l'indicateur de visibilité ajouté en
+             * v3.2 entre à part, et SEULEMENT s'il masque quelque chose — la
+             * signature d'un écran existant ne bouge pas. */
+            'pages'   => array_map(function ($_p) { return array('title' => $_p['title'], 'parent' => $_p['parent']); }, $this->pages()),
             'grid'    => $this->grid(),
             'swipe'   => $this->swipe(),
             'clock'   => $this->clock(),
@@ -2954,7 +3050,9 @@ class glowscreen32 extends eqLogic {
             /* Le SEUIL, pas l'âge : le seuil est de la configuration, l'âge est
              * de l'état. Le premier doit faire redessiner, le second jamais. */
             'infoage' => $this->infoMaxAge(),
-        ) + ($this->readOnly()
+        ) + ((count($this->pageMap()) < self::MAX_PAGES || !$this->pageVisible(0))
+            ? array('hidden' => array_values(array_diff(range(0, self::MAX_PAGES - 1), array_keys($this->pageMap()))))
+            : array()) + ($this->readOnly()
             /* v3.0 — ajoutée SEULEMENT quand elle est vraie : la signature
              * d'un écran existant ne bouge pas, et le parc ne se redessine pas
              * à la mise à jour du plugin. */
@@ -4045,6 +4143,15 @@ class glowscreen32 extends eqLogic {
         /* Les pages, la grille et les deux cases à cocher, remis en forme une
          * fois pour toutes : ce qui est relu ensuite est ce qui est écrit. */
         $this->setConfiguration('pages', $this->pages());
+        /* v3.2 (contrat v3.1) : toujours au moins une page visible — un écran
+         * sans page n'affiche rien et ne sert à rien. */
+        $anyVisible = false;
+        foreach ($this->pages() as $page) {
+            $anyVisible = $anyVisible || $page['visible'];
+        }
+        if (!$anyVisible) {
+            throw new Exception(__('Au moins une page doit rester affichée : un écran sans page n\'affiche rien.', __FILE__));
+        }
         $this->setConfiguration('grid', $this->grid());
         $this->setConfiguration('swipe', $this->swipe() ? 1 : 0);
         $this->setConfiguration('clock', $this->clock() ? 1 : 0);
@@ -4225,6 +4332,90 @@ class glowscreen32 extends eqLogic {
         return ($_button['label'] !== '') ? $where . ' « ' . $_button['label'] . ' »' : $where;
     }
 
+    /* La liste des pages CONFIGURÉES, pour les commandes « select » :
+     * « position|position — titre ». Les pages 1 à 4 sont toujours proposées :
+     * une page vide reste une page. */
+    public function pageListValue() {
+        $items = array();
+        foreach ($this->pages() as $id => $page) {
+            $title = ($page['title'] !== '') ? $page['title'] : (($id === 0) ? $this->getName() : sprintf(__('Page %s', __FILE__), $id + 1));
+            /* « | » et « ; » sont les séparateurs de listValue. */
+            $items[] = $id . '|' . ($id + 1) . ' — ' . str_replace(array('|', ';'), ' ', $title);
+        }
+        return implode(';', $items);
+    }
+
+    /* Les titres des pages visibles, pour « Pages affichées ». */
+    public function visiblePageTitles() {
+        $titles = array();
+        foreach ($this->pages() as $id => $page) {
+            if ($page['visible']) {
+                $titles[] = ($page['title'] !== '') ? $page['title'] : sprintf(__('Page %s', __FILE__), $id + 1);
+            }
+        }
+        return implode(', ', $titles);
+    }
+
+    /* listValue des commandes de pages, et valeur de « Pages affichées ». */
+    public function refreshPageCommands() {
+        $list = $this->pageListValue();
+        foreach (array('page_show', 'page_hide', 'page_only') as $logicalId) {
+            $cmd = $this->getCmd('action', $logicalId);
+            if (is_object($cmd) && $cmd->getConfiguration('listValue', '') !== $list) {
+                $cmd->setConfiguration('listValue', $list);
+                $cmd->save();
+            }
+        }
+        $this->checkAndUpdateCmd('pages_visible', $this->visiblePageTitles());
+    }
+
+    /*
+     * Change la VISIBILITÉ des pages — v3.2, appelé par les commandes
+     * d'action. $_wanted : position → bool, pour les seules pages à changer.
+     *
+     * Contrat v3.1 : l'équipement est RELU juste avant d'écrire, et SEULE la
+     * visibilité est modifiée — une configuration enregistrée entre-temps
+     * n'est jamais écrasée. Masquer la dernière page visible est REFUSÉ et
+     * journalisé (warning) ; rien n'est écrit. Rien n'est écrit non plus si
+     * rien ne change.
+     */
+    public static function applyPageVisibility($_eqLogicId, $_wanted, $_why) {
+        $eqLogic = self::byId($_eqLogicId);
+        if (!is_object($eqLogic)) {
+            throw new Exception(__('Écran introuvable.', __FILE__));
+        }
+        $pages   = $eqLogic->pages();
+        $changed = false;
+        foreach ($_wanted as $id => $visible) {
+            if (!isset($pages[$id])) {
+                continue;
+            }
+            if ($pages[$id]['visible'] !== (bool) $visible) {
+                $pages[$id]['visible'] = (bool) $visible;
+                $changed = true;
+            }
+        }
+        $remaining = 0;
+        foreach ($pages as $page) {
+            $remaining += $page['visible'] ? 1 : 0;
+        }
+        if ($remaining === 0) {
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : « %2$s » refusé — ce serait masquer la dernière page visible. Rien n\'est modifié.', __FILE__),
+                $eqLogic->getHumanName(), $_why));
+            return false;
+        }
+        if (!$changed) {
+            return false;
+        }
+        $eqLogic->setConfiguration('pages', $pages);
+        $eqLogic->save();
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : %2$s — pages affichées : %3$s (version %4$s).', __FILE__),
+            $eqLogic->getHumanName(), $_why, $eqLogic->visiblePageTitles(), $eqLogic->version()));
+        return true;
+    }
+
     public function postSave() {
         $this->forgetMemo();
         $this->createCommands();
@@ -4233,6 +4424,7 @@ class glowscreen32 extends eqLogic {
          * qu'ils viennent d'être enregistrés, et un ping retenu est réveillé —
          * « version » a pu changer, et la réponse doit le dire tout de suite. */
         $this->updateListener();
+        $this->refreshPageCommands();
         self::wakeScreen($this->getId());
 
         log::add('glowscreen32', 'info', sprintf(
@@ -4490,6 +4682,42 @@ class glowscreen32 extends eqLogic {
                 'subType' => 'other',
                 'icon'    => 'fas fa-crosshairs',
             ),
+            /*
+             * v3.2 (contrat v3.1) — la visibilité des pages, pour les
+             * scénarios (« alarme armée → n'afficher que la page État »). Les
+             * pages y sont désignées par leur POSITION DE CONFIGURATION et leur
+             * titre, jamais par leur numéro servi, qui change avec les
+             * masquages. La liste est tenue à jour en postSave.
+             */
+            'page_show' => array(
+                'name'    => __('Afficher la page', __FILE__),
+                'type'    => 'action',
+                'subType' => 'select',
+                'icon'    => 'fas fa-eye',
+            ),
+            'page_hide' => array(
+                'name'    => __('Masquer la page', __FILE__),
+                'type'    => 'action',
+                'subType' => 'select',
+                'icon'    => 'fas fa-eye-slash',
+            ),
+            'page_only' => array(
+                'name'    => __('N\'afficher que la page', __FILE__),
+                'type'    => 'action',
+                'subType' => 'select',
+                'icon'    => 'fas fa-filter',
+            ),
+            'page_all' => array(
+                'name'    => __('Afficher toutes les pages', __FILE__),
+                'type'    => 'action',
+                'subType' => 'other',
+                'icon'    => 'fas fa-layer-group',
+            ),
+            'pages_visible' => array(
+                'name'    => __('Pages affichées', __FILE__),
+                'subType' => 'string',
+                'icon'    => 'fas fa-columns',
+            ),
             'cmd_ota' => array(
                 'name'    => __('Vérifier firmware', __FILE__),
                 'type'    => 'action',
@@ -4623,6 +4851,12 @@ class glowscreen32Cmd extends cmd {
         'cmd_page'      => 'page',
         'cmd_calibrate' => 'calibrate',
         'cmd_ota'       => 'ota',
+        /* v3.2 : visibilité des pages — pas des commandes à distance, des
+         * changements de configuration. */
+        'page_show'     => 'pages:show',
+        'page_hide'     => 'pages:hide',
+        'page_only'     => 'pages:only',
+        'page_all'      => 'pages:all',
     );
 
     public function execute($_options = array()) {
@@ -4638,6 +4872,31 @@ class glowscreen32Cmd extends cmd {
             throw new Exception(__('Écran introuvable ou désactivé.', __FILE__));
         }
         $options = is_array($_options) ? $_options : array();
+        if (strpos($verb, 'pages:') === 0) {
+            /* v3.2 : visibilité des pages. La position vient de la liste
+             * (« select »), 0 à 3. */
+            $position = isset($options['select']) ? trim((string) $options['select']) : '';
+            if ($verb !== 'pages:all' && ($position === '' || !ctype_digit($position) || (int) $position >= glowscreen32::MAX_PAGES)) {
+                throw new Exception(__('Choisissez une page dans la liste.', __FILE__));
+            }
+            $position = (int) $position;
+            $wanted = array();
+            for ($id = 0; $id < glowscreen32::MAX_PAGES; $id++) {
+                if ($verb === 'pages:all') {
+                    $wanted[$id] = true;
+                } elseif ($verb === 'pages:only') {
+                    $wanted[$id] = ($id === $position);
+                }
+            }
+            if ($verb === 'pages:show') {
+                $wanted = array($position => true);
+            } elseif ($verb === 'pages:hide') {
+                $wanted = array($position => false);
+            }
+            glowscreen32::applyPageVisibility($eqLogic->getId(), $wanted, $this->getName()
+                . (($verb === 'pages:all') ? '' : ' ' . ($position + 1)));
+            return true;
+        }
         $args = array();
         if ($verb === 'message') {
             $args['text']     = isset($options['message']) ? $options['message'] : '';
