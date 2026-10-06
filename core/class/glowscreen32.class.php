@@ -4702,7 +4702,9 @@ class glowscreen32 extends eqLogic {
                 'icon'    => 'fas fa-eye-slash',
             ),
             'page_only' => array(
-                'name'    => __('N\'afficher que la page', __FILE__),
+                /* Apostrophe typographique : Jeedom retire l'apostrophe droite des
+                 * noms de commande, qui devenait « Nafficher que la page ». */
+                'name'    => __('N’afficher que la page', __FILE__),
                 'type'    => 'action',
                 'subType' => 'select',
                 'icon'    => 'fas fa-filter',
