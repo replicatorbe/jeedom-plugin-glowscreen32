@@ -507,15 +507,15 @@ firmware déposé** ; c'est vérifié par `tests/check-classes.php`, qui refuse 
 L'exclusion ne vise que les binaires, et non le dossier : `data/firmware/.htaccess`
 fait partie du plugin et doit continuer d'être déployé.
 
-### Pourquoi un `.htaccess` de plus
+### Pourquoi le binaire passe par `api.php`
 
-`data/.htaccess` porte `Deny from all`. Le firmware, lui, est téléchargé par une
-**carte**, pas par un navigateur authentifié : `data/firmware/.htaccess` rouvre
-donc les seuls fichiers `.bin`, exactement comme `plugin_info/.htaccess` rouvre
-les seules images. Sans cette exception, la carte reçoit un 403 au milieu de sa
-mise à jour, et `log/http.error` une ligne « client denied by server
-configuration » — la panne qu'a déjà eue l'icône du plugin, au même endroit et
-pour la même raison.
+Le `.htaccess` **racine** de Jeedom (cœur, intouchable) renvoie un 403, par `RedirectMatch`, sur
+tout fichier rangé sous un dossier `data/` dont l'extension n'est pas dans sa liste — `.bin` n'y
+est pas, et aucun `.htaccess` de plugin ne lève un `RedirectMatch`. Le binaire n'est donc **pas**
+servi par Apache : l'URL annoncée à la carte est `api.php?action=fwfile&token=…`, avec un jeton
+aléatoire valable 15 minutes, émis seulement quand les deux verrous sont ouverts, et lié au
+binaire déposé à cet instant. Bénéfice induit : le binaire, qui embarque les valeurs d'usine
+compilées dans le firmware, n'est téléchargeable par personne d'autre.
 
 ### Piloter un déploiement
 

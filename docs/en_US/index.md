@@ -199,8 +199,9 @@ stores the file under `data/firmware/`. A binary without that marker is
 Arduino libraries, is identical in every one of our builds, and would therefore
 never trigger an update at all. That folder's binaries are excluded from
 `deploy-plugin.sh`, so redeploying the plugin does not wipe the uploaded
-firmware, and `data/firmware/.htaccess` reopens `.bin` files so the board can
-actually download them.
+firmware. The binary is **not** served by Apache (Jeedom's root `.htaccess` returns 403 for any
+`.bin` under a `data/` folder): the board downloads it from `api.php?action=fwfile&token=…`,
+with a random token valid for 15 minutes, issued only when both locks are open.
 
 Every OTA decision is logged, naming the version asked for, the answer, and
 which lock blocked it.
