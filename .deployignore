@@ -22,3 +22,8 @@ tests/
 # fait partie du plugin, il doit continuer d'être déployé — c'est lui qui rouvre
 # les .bin que le « Deny from all » de data/ interdirait à la carte.
 data/firmware/*.bin
+
+# v3.1 : mots de passe Wi-Fi en attente de livraison (fichiers 0600). Ils
+# n'arrivent jamais par le dépôt, et un redéploiement ne doit pas les effacer
+# — ni les publier.
+data/secrets/

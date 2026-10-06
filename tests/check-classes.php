@@ -78,13 +78,104 @@ foreach (array('MODE_TOGGLE', 'MODE_ACTION', 'pressToggle', 'checkButtons') as $
     }
 }
 
-/* --- Le dernier contact doit aller dans la CONFIGURATION -------------------
- * La v1.0 ne l'écrivait que dans une commande d'information, et
- * getConfiguration('lastcontact') rendait une chaîne vide sur un écran qui
- * dialoguait parfaitement. */
-if (strpos($source, "setConfiguration('lastcontact'") === false) {
-    $echecs[] = 'noteContact() n\'écrit pas lastcontact dans la configuration : '
-              . 'getConfiguration(\'lastcontact\') rendra de nouveau une chaîne vide.';
+/* --- v2.2 : l'API n'enregistre JAMAIS l'eqLogic -----------------------------
+ * Jusqu'en v2.1, noteContact(), noteFirmware() et noteInfoStale() faisaient
+ * save(true) : l'eqLogic entier, tel que chargé au DÉBUT de la requête, était
+ * réécrit, et une configuration enregistrée entre-temps était écrasée. Avec un
+ * ping retenu 25 s, l'écrasement devenait systématique. Le dernier contact vit
+ * désormais dans la commande « Dernier contact ». */
+foreach (array('noteContact', 'noteFirmware', 'noteInfoStale', 'noteRssi',
+               'noteDiagnostics', 'noteOnline', 'noteIncompleteButtons',
+               'holdPing', 'ping', 'dequeueCommand', 'viewResult', 'values') as $nom) {
+    if (preg_match('/function ' . $nom . '\(.*?\n    \}/s', $source, $methode)) {
+        if (preg_match('/->save\(/', $methode[0])) {
+            $echecs[] = $nom . '() enregistre un objet : l\'API ne doit jamais appeler save() '
+                      . 'sur l\'eqLogic (contrat v2.2).';
+        }
+    } else {
+        $echecs[] = $nom . '() est introuvable.';
+    }
+}
+$api = file_get_contents(__DIR__ . '/../core/php/api.php');
+if (preg_match('/->save\(/', $api)) {
+    $echecs[] = 'api.php appelle save() : contrat v2.2, l\'API n\'enregistre jamais l\'eqLogic.';
+}
+foreach (array("'features'", "'rev'", 'holdPing', 'LONGPOLL_MAX', 'pullChange',
+               'enqueueCommand', 'CMD_QUEUE_MAX', 'CMD_TTL') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : l\'attente longue ou les commandes à distance '
+                  . 'du contrat v2.2 ne sont plus mises en oeuvre.';
+    }
+}
+
+/* --- v3.0 : schéma 3, tuiles « view », lecture seule ------------------------
+ * Une carte de schéma 2 prendrait une tuile « view » pour un bouton : elle doit
+ * lui être RETIRÉE, et « press » doit résoudre le rang dans l'aplatissement du
+ * schéma de la requête. La lecture seule est refusée par le plugin AVANT toute
+ * résolution. Et tout ce qui vaut « schéma 2 ou plus » se teste sur SCHEMA_V2. */
+foreach (array('SCHEMA_V2', 'MODE_VIEW', 'buttonsFor', 'viewResult', 'viewDefaults',
+               'readOnly', "'values'", "'readonly'") as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : le schéma 3 du contrat v3.0 n\'est plus mis en oeuvre.';
+    }
+}
+if (preg_match('/function buttonsFor.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'MODE_VIEW') === false) {
+        $echecs[] = 'buttonsFor() ne retire plus les tuiles « view » en schéma 2.';
+    }
+}
+if (preg_match('/function press\(.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], 'buttonsFor(') === false || strpos($methode[0], 'MODE_VIEW') === false) {
+        $echecs[] = 'press() ne résout plus le rang dans l\'aplatissement du schéma négocié, ou joue une tuile « view ».';
+    }
+}
+$apiV3 = file_get_contents(__DIR__ . '/../core/php/api.php');
+$posRo = strpos($apiV3, "'read_only'");
+$posPress = strpos($apiV3, '$eqLogic->press(');
+if ($posRo === false || $posPress === false || $posRo > $posPress) {
+    $echecs[] = 'api.php ne refuse pas read_only AVANT press() : un écran en lecture seule pourrait déclencher un bouton.';
+}
+if (preg_match('/>=\s*glowscreen32::SCHEMA_CURRENT/', $apiV3)) {
+    $echecs[] = 'api.php teste « >= SCHEMA_CURRENT » : l\'attente longue et les commandes ne seraient plus servies en schéma 2.';
+}
+
+/* --- v3.1 : corrections de la revue -----------------------------------------
+ * Le plus grave : un bouton non résolu RETIRÉ de l'aplatissement décalait tous
+ * les id suivants — le bouton d'à côté. Il doit garder son rang, inerte. */
+if (preg_match('/function activeButtons\(.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], "'_inert'") === false) {
+        $echecs[] = 'activeButtons() ne marque plus les boutons non résolus « _inert » : ils seraient retirés, et les id décalés.';
+    }
+    if (preg_match('/if \(!self::buttonResolves\(\$button\)\)\s*\{[^}]*continue;/s', $methode[0])) {
+        $echecs[] = 'activeButtons() RETIRE un bouton non résolu : bouton d\'à côté garanti au prochain appui.';
+    }
+}
+if (preg_match('/function press\(.*?\n    \}/s', $source, $methode)) {
+    if (strpos($methode[0], "_inert") === false || strpos($methode[0], 'servedKey') === false) {
+        $echecs[] = 'press() ne refuse plus un bouton inerte, ou ne compare plus au dernier layout servi.';
+    }
+}
+foreach (array('backupExclude', 'rememberServedLayout', 'forgetMemo', 'purgeSecrets', 'isSensitiveCmd',
+               'function copy(', 'checkLengths', 'pageCapacity()') as $attendu) {
+    if (strpos($source, $attendu) === false) {
+        $echecs[] = $attendu . ' est absent : une correction de la revue v3.1 a disparu.';
+    }
+}
+if (preg_match('/function trimText.*?\n    \}/s', $source, $methode) && strpos($methode[0], 'strip_tags((') !== false) {
+    $echecs[] = 'trimText() utilise strip_tags() : « <5 » serait effacé.';
+}
+if (!preg_match('/const LONGPOLL_RECHECK = 15;/', $source)) {
+    $echecs[] = 'LONGPOLL_RECHECK n\'est plus de 15 s : une requête retenue recalculerait trop souvent.';
+}
+$apiV31 = file_get_contents(__DIR__ . '/../core/php/api.php');
+foreach (array('Content-Length', 'JSON_INVALID_UTF8_SUBSTITUTE', '!is_string($apikey)', 'ctype_digit($id)',
+               'rememberServedLayout', 'holdSuperseded', 'lastHoldWhy') as $attendu) {
+    if (strpos($apiV31, $attendu) === false) {
+        $echecs[] = 'api.php : ' . $attendu . ' est absent (revue v3.1).';
+    }
+}
+if (strpos((string) @file_get_contents(__DIR__ . '/../.deployignore'), 'data/secrets/') === false) {
+    $echecs[] = '.deployignore n\'exclut pas data/secrets/ : un déploiement effacerait (ou publierait) les mots de passe en attente.';
 }
 
 /* --- Le double verrou d'OTA du contrat v1.4 --------------------------------

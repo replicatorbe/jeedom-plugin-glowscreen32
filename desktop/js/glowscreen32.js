@@ -130,8 +130,7 @@ function glowscreen32Capacity() {
    valeurs par défaut : c'est ce tableau-là qui part dans configuration.buttons. */
 function glowscreen32Button(_button, _page, _slot) {
   var button = _button || {}
-  var mode = init(button.mode, 'action')
-  if (mode !== 'toggle' && mode !== 'nav') { mode = 'action' }
+  var mode = glowscreen32Mode(button.mode)
   var nav = parseInt(init(button.nav, -1), 10)
   if (isNaN(nav) || nav < 0 || nav >= GLOWSCREEN32_LIMITS.pages) { nav = -1 }
   return {
@@ -148,8 +147,217 @@ function glowscreen32Button(_button, _page, _slot) {
     on: init(button.on, ''),
     off: init(button.off, ''),
     toggle: init(button.toggle, ''),
-    state: init(button.state, '')
+    state: init(button.state, ''),
+    /* v3.0 — tuile « valeur » : la commande montrée et sa mise en forme. */
+    view: init(button.view, ''),
+    fmt: (button.fmt && typeof button.fmt === 'object') ? Object.assign({}, button.fmt) : {}
   }
+}
+
+/* ======================================== TUILE « VALEUR » — v3.0 */
+
+/* Les sens d'une tuile, et leur couleur dans l'aperçu — celle du firmware :
+   ok vert, warn orange, alert rouge ; neutral garde la couleur de la tuile. */
+var GLOWSCREEN32_TONES = {
+  neutral: '{{neutre}}', ok: '{{normal (vert)}}', warn: '{{attention (orange)}}', alert: '{{alerte (rouge)}}'
+}
+var GLOWSCREEN32_TONE_COLORS = { ok: '#27ae60', warn: '#e67e22', alert: '#c0392b' }
+
+/* Les derniers aperçus reçus, par bloc : l'aperçu de la grille dessine la
+   valeur réelle mise en forme. */
+var glowscreen32ViewResults = {}
+
+function glowscreen32ToneSelect(_key, _title) {
+  var html = '<select class="glowscreen32ButtonAttr form-control input-sm" data-l1key="fmt" data-l2key="' + _key + '" title="' + _title + '">'
+  for (var tone in GLOWSCREEN32_TONES) {
+    html += '<option value="' + tone + '">' + GLOWSCREEN32_TONES[tone] + '</option>'
+  }
+  return html + '</select>'
+}
+
+function glowscreen32FmtInput(_key, _placeholder, _cols, _type, _max) {
+  return '<div class="col-sm-' + _cols + '"><input type="' + (_type || 'text') + '" class="glowscreen32ButtonAttr form-control input-sm" data-l1key="fmt" data-l2key="' + _key + '" placeholder="' + _placeholder + '"' + (_max ? ' maxlength="' + _max + '"' : '') + '></div>'
+}
+
+/* Le panneau « Valeur » d'un bloc : la commande, puis les réglages du TYPE de
+   cette commande (binaire, numérique, texte) — les autres sont masqués. */
+function glowscreen32ViewPanel() {
+  var html = '<div class="glowscreen32ModeView">'
+  html += '<div class="form-group" style="margin:0 0 6px 0;">'
+  html += '<label class="col-sm-3 control-label">{{Affiche}}</label>'
+  html += '<div class="col-sm-9">'
+  html += glowscreen32CmdField('view', '{{Commande d\'information à afficher}}', '{{Choisir la commande affichée}}', 'info')
+  html += '</div></div>'
+
+  /* --- binaire --- */
+  html += '<div class="glowscreen32KindBinary">'
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Valeur reçue 0 (après inversion)}}</label>'
+  html += glowscreen32FmtInput('l0', '{{libellé, ex. Ouverte}}', 5, 'text', 16)
+  html += '<div class="col-sm-4">' + glowscreen32ToneSelect('t0', '{{Sens quand la valeur vaut 0}}') + '</div></div>'
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Valeur reçue 1 (après inversion)}}</label>'
+  html += glowscreen32FmtInput('l1', '{{libellé, ex. Fermée}}', 5, 'text', 16)
+  html += '<div class="col-sm-4">' + glowscreen32ToneSelect('t1', '{{Sens quand la valeur vaut 1}}') + '</div></div>'
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Inverser}}</label>'
+  html += '<div class="col-sm-9"><input type="checkbox" class="glowscreen32ButtonAttr" data-l1key="fmt" data-l2key="invert"> '
+  html += '<span class="help-block" style="display:inline;margin:0;">{{0 et 1 sont échangés avant la mise en forme.}}</span></div></div>'
+  html += '</div>'
+
+  /* --- numérique --- */
+  html += '<div class="glowscreen32KindNumeric">'
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Unité, décimales}}</label>'
+  html += glowscreen32FmtInput('unit', '{{vide = celle de la commande}}', 3, 'text', 8)
+  html += '<div class="col-sm-3"><select class="glowscreen32ButtonAttr form-control input-sm" data-l1key="fmt" data-l2key="dec">'
+  html += '<option value="">{{auto}}</option><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></div>'
+  html += '<div class="col-sm-3">' + glowscreen32ToneSelect('base', '{{Sens sous le premier seuil}}') + '</div></div>'
+  for (var t = 1; t <= 3; t++) {
+    html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Seuil}} ' + t + ' (≥)</label>'
+    html += glowscreen32FmtInput('th' + t + 'v', '{{valeur}}', 3)
+    html += '<div class="col-sm-4">' + glowscreen32ToneSelect('th' + t + 't', '{{Sens à partir de ce seuil}}') + '</div></div>'
+  }
+  html += '</div>'
+
+  /* --- texte --- */
+  html += '<div class="glowscreen32KindString">'
+  for (var m = 1; m <= 6; m++) {
+    html += '<div class="form-group" style="margin:0 0 4px 0;"><label class="col-sm-3 control-label">' + ((m === 1) ? '{{Valeur → libellé}}' : '') + '</label>'
+    html += glowscreen32FmtInput('m' + m + 'v', '{{valeur reçue}}', 3, 'text', 64)
+    html += glowscreen32FmtInput('m' + m + 'l', '{{libellé affiché}}', 3, 'text', 16)
+    html += '<div class="col-sm-3">' + glowscreen32ToneSelect('m' + m + 't', '{{Sens}}') + '</div></div>'
+  }
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><div class="col-sm-offset-3 col-sm-9"><span class="help-block" style="margin:0;">{{Une valeur absente de la table s\'affiche telle quelle, en neutre.}}</span></div></div>'
+  html += '</div>'
+
+  /* --- commun : péremption, aperçu --- */
+  html += '<div class="form-group" style="margin:0 0 6px 0;"><label class="col-sm-3 control-label">{{Périmée après (min)}}</label>'
+  html += glowscreen32FmtInput('age', '{{défaut}}', 3, 'number')
+  html += '<div class="col-sm-6"><span class="help-block glowscreen32AgeHelp" style="margin:0;"></span></div></div>'
+  html += '<div class="form-group" style="margin:0;"><label class="col-sm-3 control-label">{{Aperçu}}</label>'
+  html += '<div class="col-sm-9"><span class="form-control-static glowscreen32ViewPreview">—</span>'
+  html += '<div class="alert alert-warning glowscreen32ViewDoubt" style="display:none;margin:4px 0 0 0;padding:4px 8px;">{{Le sens de 0 et de 1 n\'est pas fixé par Jeedom et varie d\'un module à l\'autre : vérifiez sur l\'aperçu, avec la vraie valeur, que l\'état affiché est le bon. Sinon, cochez « Inverser ».}}</div>'
+  html += '</div></div>'
+  html += '</div>'
+  return html
+}
+
+/* Montre le panneau du type de la commande choisie (binaire, numérique,
+   texte) — connu par l'aperçu serveur, rangé sur le bloc. */
+function glowscreen32ShowKind(_block) {
+  var kind = _block.getAttribute('data-gs-kind') || ''
+  _block.querySelector('.glowscreen32KindBinary').style.display = (kind === 'binary') ? '' : 'none'
+  _block.querySelector('.glowscreen32KindNumeric').style.display = (kind === 'numeric') ? '' : 'none'
+  _block.querySelector('.glowscreen32KindString').style.display = (kind === 'string') ? '' : 'none'
+  _block.querySelector('.glowscreen32AgeHelp').textContent = (kind === 'numeric')
+    ? '{{Vide = 60 min. 0 = jamais. Au-delà, la tuile affiche « — ».}}'
+    : '{{Vide = jamais : une porte fermée depuis trois jours n\'émet rien et dit vrai. La tuile affiche aussi « — » si l\'équipement est en alerte de communication Jeedom.}}'
+}
+
+/* Les réglages saisis dans un bloc, tels qu'ils partiront. */
+function glowscreen32BlockFmt(_block) {
+  var values = _block.getJeeValues('.glowscreen32ButtonAttr')[0]
+  return (values && values.fmt) ? values.fmt : {}
+}
+
+/* Demande l'aperçu au serveur — la MÊME fonction que l'API, sur la saisie en
+   cours. _prefill : nouvelle commande choisie, on remplit d'après son type
+   générique. Tout ce qui revient est posé par textContent. */
+var glowscreen32ViewTimers = {}
+/* v3.1 : chaque ouverture d'écran change de génération ; une réponse d'aperçu
+   arrivée pour une génération (ou un bloc) qui n'existe plus est ignorée —
+   sinon la valeur d'un autre écran s'afficherait dans celui-ci. */
+var glowscreen32ViewGen = 0
+var glowscreen32ViewSeq = {}
+function glowscreen32ViewPreview(_block, _prefill) {
+  var cmdField = _block.querySelector('.glowscreen32ButtonAttr[data-l1key="view"]')
+  var out = _block.querySelector('.glowscreen32ViewPreview')
+  var key = _block.getAttribute('data-gs-page') + ':' + _block.getAttribute('data-gs-slot')
+  if (cmdField === null || String(cmdField.value).trim() === '') {
+    out.textContent = '—'
+    _block.setAttribute('data-gs-kind', '')
+    glowscreen32ShowKind(_block)
+    delete glowscreen32ViewResults[key]
+    return
+  }
+  var data = { cmd: cmdField.value }
+  if (!_prefill) { data.fmt = JSON.stringify(glowscreen32BlockFmt(_block)) }
+  var gen = glowscreen32ViewGen
+  var seq = (glowscreen32ViewSeq[key] || 0) + 1
+  glowscreen32ViewSeq[key] = seq
+  glowscreen32Ajax('viewpreview', data, function (result) {
+    if (gen !== glowscreen32ViewGen || seq !== glowscreen32ViewSeq[key] || !document.body.contains(_block)) { return }
+    if (result.why === 'missing' && result.kind === '') {
+      _block.setAttribute('data-gs-kind', '')
+      glowscreen32ShowKind(_block)
+      out.textContent = '— ({{commande introuvable : supprimée, ou pas une commande d\'information}})'
+      glowscreen32ViewResults[key] = result.result
+      glowscreen32RenderPreview()
+      return
+    }
+    _block.setAttribute('data-gs-kind', result.kind)
+    if (_prefill) {
+      var wasRendering = glowscreen32Rendering
+      glowscreen32Rendering = true
+      var fmt = Object.assign({}, result.defaults)
+      fmt.invert = (fmt.invert === 1) ? '1' : '0'
+      if (fmt.unit === null) { fmt.unit = '' }
+      if (fmt.dec === '' || fmt.dec === null) { fmt.dec = '' }
+      _block.setJeeValues({ fmt: fmt }, '.glowscreen32ButtonAttr')
+      glowscreen32Rendering = wasRendering
+    }
+    glowscreen32ShowKind(_block)
+    _block.querySelector('.glowscreen32ViewDoubt').style.display = (result.kind === 'binary' && result.doubt) ? '' : 'none'
+    var why = {
+      missing: '{{commande introuvable}}', disabled: '{{équipement désactivé}}',
+      timeout: '{{équipement en alerte de communication}}', stale: '{{valeur périmée}}', empty: '{{aucune valeur}}'
+    }
+    var shown = (result.result.v === null)
+      ? '— (' + init(why[result.why], result.why) + ')'
+      : '« ' + result.result.v + ' » — ' + init(GLOWSCREEN32_TONES[result.result.t], result.result.t)
+    out.textContent = shown + '   [{{valeur brute}} : ' + result.raw + (result.generic ? ', ' + result.generic : '') + ']'
+    glowscreen32ViewResults[key] = result.result
+    if (_prefill) { glowscreen32MarkModified() }
+    glowscreen32RenderPreview()
+  })
+}
+
+/* ======================================= COMMANDES SENSIBLES — v3.1 */
+
+/* Les cases dont une commande vise un portail, une porte, un garage, une
+   serrure ou une alarme — d'après le serveur (type générique, nom). */
+var glowscreen32SensitiveKeys = {}
+
+function glowscreen32CheckSensitive(_block) {
+  var key = _block.getAttribute('data-gs-page') + ':' + _block.getAttribute('data-gs-slot')
+  var banner = _block.querySelector('.glowscreen32Sensitive')
+  var mode = glowscreen32Mode(_block.querySelector('.glowscreen32Mode').value)
+  var fields = (mode === 'toggle') ? ['on', 'off', 'toggle'] : ((mode === 'action') ? ['cmd'] : [])
+  var refs = []
+  for (var f = 0; f < fields.length; f++) {
+    var input = _block.querySelector('.glowscreen32ButtonAttr[data-l1key="' + fields[f] + '"]')
+    if (input !== null && String(input.value).trim() !== '') { refs.push(String(input.value).trim()) }
+  }
+  if (mode === 'action' && _block.querySelector('.glowscreen32Target').value !== 'cmd') { refs = [] }
+  if (refs.length === 0) {
+    banner.style.display = 'none'
+    delete glowscreen32SensitiveKeys[key]
+    glowscreen32RenderPreview()
+    return
+  }
+  var gen = glowscreen32ViewGen
+  glowscreen32Ajax('sensitive', { refs: JSON.stringify(refs) }, function (result) {
+    if (gen !== glowscreen32ViewGen || !document.body.contains(_block)) { return }
+    var hit = false
+    for (var r = 0; r < refs.length; r++) { if (result[refs[r]] === true) { hit = true } }
+    banner.style.display = hit ? '' : 'none'
+    if (hit) { glowscreen32SensitiveKeys[key] = true } else { delete glowscreen32SensitiveKeys[key] }
+    glowscreen32RenderPreview()
+  })
+}
+
+/* Un aperçu à chaque frappe, mais pas une requête par touche. */
+function glowscreen32ViewPreviewSoon(_block) {
+  var key = _block.getAttribute('data-gs-page') + ':' + _block.getAttribute('data-gs-slot')
+  clearTimeout(glowscreen32ViewTimers[key])
+  glowscreen32ViewTimers[key] = setTimeout(function () { glowscreen32ViewPreview(_block, false) }, 400)
 }
 
 /* Le modèle, reconstruit depuis la configuration de l'équipement.
@@ -270,6 +478,7 @@ function glowscreen32AddButton(_page, _slot, _button, _outside) {
   div += '<option value="action">{{Action simple}}</option>'
   div += '<option value="toggle">{{Interrupteur (allumer / éteindre)}}</option>'
   div += '<option value="nav">{{Navigation (ouvrir une page)}}</option>'
+  div += '<option value="view">{{Valeur (afficher une information)}}</option>'
   div += '</select>'
   div += '</div>'
   div += '<div class="col-sm-5">'
@@ -286,7 +495,7 @@ function glowscreen32AddButton(_page, _slot, _button, _outside) {
   div += '<option value="-1">{{Choisissez une page}}</option>'
   for (var navPage = 0; navPage < GLOWSCREEN32_LIMITS.pages; navPage++) {
     if (navPage === _page) { continue }
-    div += '<option value="' + navPage + '">' + glowscreen32PageName(navPage) + '</option>'
+    div += '<option value="' + navPage + '">' + glowscreen32Escape(glowscreen32PageName(navPage)) + '</option>'
   }
   div += '</select>'
   div += '</div>'
@@ -295,6 +504,14 @@ function glowscreen32AddButton(_page, _slot, _button, _outside) {
   div += '</div>'
   div += '</div>'
   div += '</div>'
+
+  /* --- Avertissement « commande sensible », v3.1 ----------------------- */
+  div += '<div class="alert alert-warning glowscreen32Sensitive" style="display:none;margin:0 0 6px 0;padding:4px 8px;">'
+  div += '<i class="fas fa-exclamation-triangle"></i> {{Ce bouton commande un portail, une porte, un garage, une serrure ou une alarme. Un appui sur l\'écran l\'actionnera pour de bon. Pour un écran posé dans une entrée ou un garage, pensez à l\'option « Lecture seule » de l\'onglet Écran : le plugin refusera alors tout appui venant de lui.}}'
+  div += '</div>'
+
+  /* --- Mode « valeur », v3.0 ------------------------------------------- */
+  div += glowscreen32ViewPanel()
 
   /* --- Mode « action simple » ------------------------------------------- */
   div += '<div class="glowscreen32ModeAction">'
@@ -378,10 +595,26 @@ function glowscreen32AddButton(_page, _slot, _button, _outside) {
     on: init(button.on, ''),
     off: init(button.off, ''),
     toggle: init(button.toggle, ''),
-    state: init(button.state, '')
+    state: init(button.state, ''),
+    view: init(button.view, '')
   }, '.glowscreen32ButtonAttr')
+  if (button.fmt && typeof button.fmt === 'object') {
+    var fmt = Object.assign({}, button.fmt)
+    fmt.invert = (String(fmt.invert) === '1') ? '1' : '0'
+    if (fmt.unit === null) { fmt.unit = '' }
+    block.setJeeValues({ fmt: fmt }, '.glowscreen32ButtonAttr')
+  }
 
   glowscreen32ShowMode(block)
+  /* Une tuile « valeur » déjà configurée : son panneau dépend du type de la
+     commande, et son aperçu de la vraie valeur — les deux viennent du
+     serveur. */
+  if (glowscreen32Mode(button.mode) === 'view' && init(button.view, '') !== '') {
+    glowscreen32ViewPreview(block, false)
+  }
+  if (init(button.cmd, '') !== '' || init(button.on, '') !== '' || init(button.off, '') !== '' || init(button.toggle, '') !== '') {
+    glowscreen32CheckSensitive(block)
+  }
   return block
 }
 
@@ -440,14 +673,17 @@ function glowscreen32ShowMode(_block) {
   var mode = glowscreen32Mode(_block.querySelector('.glowscreen32Mode').value)
   var toggle = (mode === 'toggle')
   var nav = (mode === 'nav')
+  var view = (mode === 'view')
 
   _block.querySelector('.glowscreen32ModeAction').style.display = (mode === 'action') ? '' : 'none'
   _block.querySelector('.glowscreen32ModeToggle').style.display = toggle ? '' : 'none'
   _block.querySelector('.glowscreen32ModeNav').style.display = nav ? '' : 'none'
+  _block.querySelector('.glowscreen32ModeView').style.display = view ? '' : 'none'
+  if (view) { glowscreen32ShowKind(_block) }
   /* Un bouton de navigation n'a pas d'état : le contrat dit qu'il vaut
      TOUJOURS null, et laisser le champ visible inviterait à en désigner un qui
-     ne serait jamais lu. */
-  _block.querySelector('.glowscreen32State').style.display = nav ? 'none' : ''
+     ne serait jamais lu. Une tuile « valeur » non plus : elle a une valeur. */
+  _block.querySelector('.glowscreen32State').style.display = (nav || view) ? 'none' : ''
   _block.querySelector('.glowscreen32StateAction').style.display = toggle ? 'none' : ''
   _block.querySelector('.glowscreen32StateToggle').style.display = toggle ? '' : 'none'
 
@@ -456,6 +692,8 @@ function glowscreen32ShowMode(_block) {
     help = '{{Le plugin lit l\'état, puis joue la commande inverse : un appui allume, le suivant éteint.}}'
   } else if (nav) {
     help = '{{Le bouton ouvre une autre page de cet écran. Il ne commande rien et n\'a pas d\'état ; une carte au firmware antérieur à la v2 ne le verra pas du tout.}}'
+  } else if (view) {
+    help = '{{La tuile affiche une information mise en forme ici (porte, alarme, température…). Un toucher ne fait rien. Seule une carte de schéma 3 (firmware 2.3.x et suivants) la dessine ; les autres ne la reçoivent pas.}}'
   }
   _block.querySelector('.glowscreen32ModeHelp').textContent = help
 
@@ -469,7 +707,7 @@ function glowscreen32ShowMode(_block) {
 /* Le mode d'un bouton, ramené aux trois du contrat. */
 function glowscreen32Mode(_mode) {
   var mode = String(init(_mode, 'action'))
-  return (mode === 'toggle' || mode === 'nav') ? mode : 'action'
+  return (mode === 'toggle' || mode === 'nav' || mode === 'view') ? mode : 'action'
 }
 
 /* Les options de la liste d'icônes, dans l'ordre du contrat. */
@@ -524,7 +762,9 @@ function glowscreen32RenderPageHeader() {
   var html = '<div class="form-group" style="margin:0 0 10px 0;">'
   html += '<label class="col-sm-3 control-label">{{Titre de la page}}</label>'
   html += '<div class="col-sm-4">'
-  html += '<input type="text" class="form-control input-sm" id="in_glowscreen32PageTitle" maxlength="24" placeholder="' + glowscreen32PageName(glowscreen32Page) + '">'
+  /* Le titre d'une page est une saisie libre, recollée ici dans du HTML : il
+     est ÉCHAPPÉ, comme partout ailleurs dans cette page (v2.2). */
+  html += '<input type="text" class="form-control input-sm" id="in_glowscreen32PageTitle" maxlength="24" placeholder="' + glowscreen32Escape(glowscreen32PageName(glowscreen32Page)) + '">'
   html += '</div>'
   if (glowscreen32Page > 0) {
     html += '<label class="col-sm-2 control-label">{{Page parente}}</label>'
@@ -532,7 +772,7 @@ function glowscreen32RenderPageHeader() {
     html += '<select class="form-control input-sm" id="sel_glowscreen32PageParent">'
     for (var parent = 0; parent < GLOWSCREEN32_LIMITS.pages; parent++) {
       if (parent === glowscreen32Page) { continue }
-      html += '<option value="' + parent + '">' + glowscreen32PageName(parent) + '</option>'
+      html += '<option value="' + parent + '">' + glowscreen32Escape(glowscreen32PageName(parent)) + '</option>'
     }
     html += '</select>'
     html += '</div>'
@@ -617,6 +857,11 @@ function glowscreen32ShowPage(_page) {
    boutons par écran, et la troncature emporterait de vrais boutons. */
 function glowscreen32ButtonFilled(_button) {
   if (_button.mode === 'nav') { return true }
+  /* v3.1 : une couleur, une icône ou un mode choisis sont une saisie en
+     cours — changer de page ne doit pas la perdre. */
+  if (_button.mode !== 'action' || _button.icon !== 'none'
+      || String(_button.color).toLowerCase() !== GLOWSCREEN32_DEFAULT_COLOR) { return true }
+  if (_button.mode === 'view') { return _button.view !== '' || _button.label !== '' }
   return _button.label !== '' || _button.target !== '' || _button.cmd !== ''
       || _button.scenario > 0 || _button.on !== '' || _button.off !== ''
       || _button.toggle !== '' || _button.state !== ''
@@ -666,6 +911,7 @@ function glowscreen32ButtonDrawn(_button) {
   if (_button.mode === 'toggle') {
     return _button.state !== '' && (_button.on !== '' || _button.off !== '' || _button.toggle !== '')
   }
+  if (_button.mode === 'view') { return _button.view !== '' }
   if (_button.target === 'cmd') { return _button.cmd !== '' }
   if (_button.target === 'scenario') { return _button.scenario > 0 }
   return false
@@ -699,6 +945,7 @@ function glowscreen32Flatten() {
       }
       taken[slot] = true
       var copy = Object.assign({}, list[i])
+      copy.origSlot = list[i].slot
       copy.slot = slot
       placed.push(copy)
     }
@@ -739,6 +986,15 @@ function glowscreen32RenderPreview() {
     }
     var button = here[slot].button
     tile.style.background = button.color
+    /* Une tuile « valeur » : la valeur réelle mise en forme par le serveur, et
+       la couleur de son SENS (neutre = couleur de la tuile). */
+    var viewResult = null
+    if (button.mode === 'view') {
+      viewResult = init(glowscreen32ViewResults[button.page + ':' + init(button.origSlot, button.slot)], null)
+      if (viewResult && isset(GLOWSCREEN32_TONE_COLORS[viewResult.t])) {
+        tile.style.background = GLOWSCREEN32_TONE_COLORS[viewResult.t]
+      }
+    }
     if (button.icon !== 'none') {
       var icon = document.createElement('div')
       icon.className = 'glowscreen32TileIcon'
@@ -752,6 +1008,12 @@ function glowscreen32RenderPreview() {
       ? button.label
       : ((button.mode === 'nav') ? glowscreen32PageName(button.nav) : '…')
     tile.appendChild(label)
+    if (button.mode === 'view') {
+      var value = document.createElement('div')
+      value.style.fontWeight = 'bold'
+      value.textContent = (viewResult && viewResult.v !== null) ? viewResult.v : '—'
+      tile.appendChild(value)
+    }
     /* L'id GLOBAL du contrat v2.0, celui que la carte renverra à « press ». Le
        montrer ici évite d'avoir à le compter à la main, pages comprises, quand
        on essaie un bouton au curl. */
@@ -760,7 +1022,13 @@ function glowscreen32RenderPreview() {
     var mark = ''
     if (button.mode === 'toggle') { mark = ' ⇄' }
     if (button.mode === 'nav') { mark = ' →' }
-    rank.textContent = 'id ' + here[slot].id + mark
+    if (button.mode === 'view') { mark = ' ◉' }
+    var sensitive = glowscreen32SensitiveKeys[button.page + ':' + init(button.origSlot, button.slot)] === true
+    /* L'id du SCHÉMA 3. Une carte de schéma 2 ne reçoit pas les tuiles
+       « valeur », et ses id sont recalculés sans elles : « Voir ce que la carte
+       reçoit » donne la correspondance de chaque schéma. */
+    rank.textContent = (sensitive ? '⚠ ' : '') + '{{id (schéma 3)}} ' + here[slot].id + mark
+    if (sensitive) { rank.title = '{{Commande sensible (portail, porte, garage, serrure, alarme)}}' }
     tile.appendChild(rank)
     grid.appendChild(tile)
   }
@@ -787,6 +1055,11 @@ function printEqLogic(_eqLogic) {
     payload.textContent = ''
   }
 
+  /* v3.1 : rien de l'écran précédemment ouvert ne doit survivre. */
+  glowscreen32ViewGen++
+  glowscreen32ViewResults = {}
+  glowscreen32SensitiveKeys = {}
+
   var configuration = init(_eqLogic.configuration, {})
   var saved = isset(_eqLogic.id) && _eqLogic.id != ''
 
@@ -795,21 +1068,14 @@ function printEqLogic(_eqLogic) {
     version.textContent = saved ? init(configuration.version, 1) : '-'
   }
 
-  var contact = document.getElementById('span_glowscreen32Contact')
-  if (contact !== null) {
-    contact.textContent = saved
-      ? glowscreen32HumanContact(init(configuration.lastcontact, ''))
-      : '-'
-  }
-
-  /* La version annoncée par la CARTE, contrat v1.4. Elle ne vient pas du
-     formulaire : tant qu'aucune carte n'a appelé, il n'y a rien à montrer, et
-     montrer « 0.0.0 » serait pire que de dire « inconnu ». */
-  var firmware = document.getElementById('span_glowscreen32Firmware')
-  if (firmware !== null) {
-    var fw = String(init(configuration.fw, '')).trim()
-    firmware.textContent = (saved && fw !== '') ? fw : '{{inconnu}}'
-  }
+  /* Dernier contact, firmware, diagnostics : v2.2, ils ne sont plus dans la
+     configuration — l'API n'enregistre plus l'eqLogic — mais dans les
+     commandes d'information. Ils sont donc demandés au contrôleur. */
+  glowscreen32ShowState(saved ? _eqLogic.id : null)
+  var ssid = document.getElementById('in_glowscreen32WifiSsid')
+  var pass = document.getElementById('in_glowscreen32WifiPass')
+  if (ssid !== null) { ssid.value = '' }
+  if (pass !== null) { pass.value = '' }
 
   /* Le modèle est reconstruit AVANT le rendu : les quatre pages n'existent que
      là, et le DOM n'en porte qu'une à la fois. */
@@ -824,6 +1090,49 @@ function printEqLogic(_eqLogic) {
 
   glowscreen32RenderPage()
   glowscreen32ShowApi(init(configuration.mac, ''))
+}
+
+/* Ce que la carte dit d'elle-même — dernier contact, firmware, diagnostics.
+   Tout est posé par textContent : ces valeurs viennent de la carte (le SSID en
+   particulier est une chaîne libre). */
+function glowscreen32ShowState(_id) {
+  var fields = {
+    contact: document.getElementById('span_glowscreen32Contact'),
+    firmware: document.getElementById('span_glowscreen32Firmware'),
+    net: document.getElementById('span_glowscreen32Net'),
+    run: document.getElementById('span_glowscreen32Run'),
+    mem: document.getElementById('span_glowscreen32Mem')
+  }
+  for (var key in fields) {
+    if (fields[key] !== null) { fields[key].textContent = '-' }
+  }
+  if (_id === null) {
+    if (fields.firmware !== null) { fields.firmware.textContent = '{{inconnu}}' }
+    return
+  }
+  glowscreen32Ajax('screenstate', { id: _id }, function (state) {
+    var current = document.querySelector('.eqLogicAttr[data-l1key="id"]')
+    if (current !== null && String(current.value) !== String(_id)) { return }
+    if (fields.contact !== null) { fields.contact.textContent = glowscreen32HumanContact(state.contact) }
+    if (fields.firmware !== null) {
+      var fw = String(init(state.fw, '')).trim()
+      fields.firmware.textContent = (fw !== '') ? fw : '{{inconnu}}'
+    }
+    var dash = function (_value, _suffix) {
+      var text = String(init(_value, '')).trim()
+      return (text === '') ? '—' : text + (_suffix || '')
+    }
+    if (fields.net !== null) {
+      fields.net.textContent = '{{IP}} ' + dash(state.ip) + ' · {{SSID}} ' + dash(state.ssid) + ' · ' + dash(state.rssi, ' dBm')
+    }
+    if (fields.run !== null) {
+      fields.run.textContent = '{{en marche depuis}} ' + dash(state.uptime) + ' · {{dernier redémarrage :}} ' + dash(state.rst)
+        + ((state.queue > 0) ? ' · {{commandes en attente :}} ' + state.queue : '')
+    }
+    if (fields.mem !== null) {
+      fields.mem.textContent = '{{libre}} ' + dash(state.heap, ' o') + ' · {{plus gros bloc}} ' + dash(state.blk, ' o')
+    }
+  })
 }
 
 /* « 22/09/2026 11:03:05 (il y a 2 min) ». Une date seule oblige à regarder
@@ -869,7 +1178,11 @@ function glowscreen32ShowApi(_mac) {
 
   var mac = String(_mac || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase()
   var device = (mac.length === 12) ? mac : '<{{adresse MAC}}>'
+  /* v3.1 : avec l'en-tête de schéma — sans lui, la réponse est celle du
+     schéma 1 (six boutons, sans tuile « valeur »), et ses id ne sont pas
+     ceux de l'aperçu. */
   sample.value = 'curl -s -H "' + init(api.header, 'X-GLOWSCREEN32-APIKEY') + ': ' + api.apikey + '" \\\n'
+    + '  -H "X-GLOWSCREEN32-SCHEMA: 3" \\\n'
     + '  "' + api.url + '?action=layout&device=' + device + '"'
 }
 
@@ -1105,6 +1418,9 @@ glowscreen32Container.addEventListener('input', function (event) {
   if (glowscreen32ButtonEdited(event.target)) {
     glowscreen32MarkModified()
     glowscreen32RenderPreview()
+    /* v3.0 : un réglage de tuile « valeur » change → nouvel aperçu. */
+    var viewBlock = event.target.closest('.glowscreen32ModeView')
+    if (viewBlock !== null) { glowscreen32ViewPreviewSoon(viewBlock.closest('.glowscreen32Button')) }
   }
 })
 
@@ -1156,8 +1472,15 @@ glowscreen32Container.addEventListener('change', function (event) {
   var block = event.target.closest('.glowscreen32Button')
   if (block === null) { return }
 
+  if (event.target.closest('.glowscreen32Mode') || event.target.closest('.glowscreen32Target')
+      || event.target.matches('.glowscreen32ButtonAttr[data-l1key="cmd"], .glowscreen32ButtonAttr[data-l1key="on"], .glowscreen32ButtonAttr[data-l1key="off"], .glowscreen32ButtonAttr[data-l1key="toggle"]')) {
+    glowscreen32CheckSensitive(block)
+  }
   if (event.target.closest('.glowscreen32Mode')) {
     glowscreen32ShowMode(block)
+    if (glowscreen32Mode(event.target.value) === 'view') { glowscreen32ViewPreview(block, false) }
+  } else if (event.target.closest('.glowscreen32ModeView') && !glowscreen32Rendering) {
+    glowscreen32ViewPreviewSoon(block)
   } else if (event.target.closest('.glowscreen32Target')) {
     glowscreen32ShowTarget(block)
   }
@@ -1187,6 +1510,46 @@ glowscreen32Container.addEventListener('click', function (event) {
       if (field === null) { return }
       field.jeeValue(result.human)
       glowscreen32MarkModified()
+    })
+    return
+  }
+
+  /* v2.2 : la commande à distance « wifi ». Elle ne part QUE d'ici — jamais
+     d'un scénario —, le mot de passe n'est pas enregistré dans l'équipement,
+     et une confirmation précède l'envoi : des identifiants faux coupent
+     l'écran du réseau pendant une minute avant son retour en arrière. */
+  if (target = event.target.closest('#bt_glowscreen32Wifi')) {
+    if (target.classList.contains('disabled')) { return }
+    var wifiId = document.querySelector('.eqLogicAttr[data-l1key="id"]')
+    var ssidField = document.getElementById('in_glowscreen32WifiSsid')
+    var passField = document.getElementById('in_glowscreen32WifiPass')
+    if (wifiId === null || wifiId.value === '' || ssidField === null || passField === null) { return }
+    if (String(ssidField.value).trim() === '') {
+      jeedomUtils.showAlert({ message: '{{Indiquez le nom du réseau.}}', level: 'warning' })
+      return
+    }
+    var wifiButton = target
+    var pass = String(passField.value)
+    var bytes = new TextEncoder().encode(pass).length
+    if (bytes > 0 && bytes < 8) {
+      jeedomUtils.showAlert({ message: '{{Un mot de passe WPA fait au moins 8 caractères (ou rien pour un réseau ouvert).}}', level: 'warning' })
+      return
+    }
+    if (bytes === 64 && !/^[0-9a-fA-F]{64}$/.test(pass)) {
+      jeedomUtils.showAlert({ message: '{{64 caractères : seule une clé hexadécimale est acceptée ; une phrase de passe en fait 63 au plus.}}', level: 'warning' })
+      return
+    }
+    var nameField = document.querySelector('.eqLogicAttr[data-l1key="name"]')
+    var screenName = (nameField !== null) ? nameField.value : ''
+    jeeDialog.confirm('{{Envoyer le réseau}} « ' + glowscreen32Escape(ssidField.value) + ' » {{à l\'écran}} « ' + glowscreen32Escape(screenName) + ' » ? {{Si la carte ne parvient pas à s\'y connecter sous 60 secondes, elle revient à son réseau précédent.}}', function (confirmed) {
+      if (!confirmed) { return }
+      glowscreen32Ajax('wifi', { id: wifiId.value, ssid: ssidField.value, pass: passField.value }, function (result) {
+        passField.value = ''
+        jeedomUtils.showAlert({
+          message: '{{Identifiants mis en file (seq}} ' + glowscreen32Escape(result.seq) + '{{). La carte les recevra à son prochain appel.}}',
+          level: 'success'
+        })
+      }, wifiButton)
     })
     return
   }
@@ -1227,6 +1590,15 @@ glowscreen32Container.addEventListener('click', function (event) {
     jeedom.cmd.getSelectModal({ cmd: { type: cmdType } }, function (result) {
       block.querySelector('.glowscreen32ButtonAttr[data-l1key="' + field + '"]').jeeValue(result.human)
       glowscreen32MarkModified()
+      /* v3.0 : une nouvelle commande affichée — préremplissage d'après son
+         type générique, puis aperçu avec la vraie valeur. */
+      if (field === 'view') {
+        glowscreen32ViewPreview(block, true)
+        return
+      }
+      if (field === 'cmd' || field === 'on' || field === 'off' || field === 'toggle') {
+        glowscreen32CheckSensitive(block)
+      }
       glowscreen32RenderPreview()
     })
     return
@@ -1250,8 +1622,22 @@ glowscreen32Container.addEventListener('click', function (event) {
          que reçoit une carte restée en schéma 1 — six boutons renumérotés, sans
          les boutons de navigation — et de vérifier qu'un id n'y désigne pas le
          même bouton que dans le schéma 2. */
-      payload.textContent = '// X-GLOWSCREEN32-SCHEMA: 2\n'
+      var ids = ''
+      var names = { 3: '{{schéma 3 (firmware 2.3 et suivants)}}', 2: '{{schéma 2 (firmware 2.0 à 2.2)}}', 1: '{{schéma 1 (firmware 1.x)}}' }
+      for (var sc = 3; sc >= 1; sc--) {
+        ids += '// ' + names[sc] + '\n'
+        var map = init(result.ids[sc], [])
+        for (var m = 0; m < map.length; m++) {
+          ids += '//   id ' + map[m].id + ' → ' + map[m].label + ' (' + map[m].mode + ', {{page}} ' + (map[m].page + 1) + ')'
+            + (map[m].inert ? ' {{— INERTE : commande introuvable}}' : '') + (map[m].sensitive ? ' ⚠' : '') + '\n'
+        }
+      }
+      payload.textContent = '// {{Correspondance id → bouton, par schéma : un même bouton n\'a pas le même id d\'un schéma à l\'autre.}}\n'
+        + ids + '\n'
+        + '// X-GLOWSCREEN32-SCHEMA: 3\n'
         + JSON.stringify(result.layout, null, 2)
+        + '\n\n// X-GLOWSCREEN32-SCHEMA: 2 — {{sans les tuiles « valeur », id recalculés}}\n'
+        + JSON.stringify(result.v2, null, 2)
         + '\n\n// {{sans en-tête de schéma — une carte antérieure à la v2}}\n'
         + JSON.stringify(result.legacy, null, 2)
     }, target)

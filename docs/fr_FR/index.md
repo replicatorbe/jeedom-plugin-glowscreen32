@@ -3,8 +3,8 @@
 Pilote des écrans tactiles ESP32 depuis Jeedom.
 
 Un équipement du plugin = **un** écran physique, reconnu à l'adresse MAC de sa
-carte. L'écran affiche jusqu'à six boutons ; l'utilisateur décide, dans Jeedom,
-de ce que chacun déclenche. La carte récupère sa mise en page au démarrage, puis
+carte. L'écran affiche jusqu'à trente-deux boutons et tuiles, sur quatre pages ;
+l'utilisateur décide, dans Jeedom, de ce que chacun déclenche ou affiche. La carte récupère sa mise en page au démarrage, puis
 signale les appuis.
 
 Le parc est multi-écrans par construction : on crée autant d'équipements que
@@ -29,7 +29,7 @@ son identité en lisant sa propre adresse MAC au démarrage.
 Un emplacement laissé vide n'est pas envoyé à la carte : il ne laisse pas de
 case morte sur l'écran, les boutons suivants remontent.
 
-### Les deux modes de bouton
+### Les modes de bouton
 
 C'est le choix qui décide de ce que fait l'appui.
 
@@ -91,6 +91,42 @@ un volet à 40 % n'a pas d'état binaire : le bouton reste neutre, ce qui vaut
 mieux que de l'afficher à l'envers une fois sur deux. Le contrat prévoit `null`
 pour exactement ce cas.
 
+### La tuile « Valeur » — v3.0
+
+Mode **Valeur** : la tuile affiche une commande d'information au lieu d'agir.
+Choisissez la commande ; le panneau s'adapte à son type et se **préremplit**
+d'après son type générique Jeedom (porte, serrure, alarme, chauffage,
+température…).
+
+| Type | Réglages |
+|---|---|
+| binaire | libellé et sens pour 0 et pour 1, case « Inverser » |
+| numérique | unité, décimales, sens sous le premier seuil, trois seuils croissants « ≥ valeur → sens » |
+| texte | jusqu'à six lignes « valeur reçue → libellé + sens » ; sinon la valeur brute, neutre |
+
+Le **sens** (neutre, normal, attention, alerte) est une signification, pas une
+couleur : vert, orange et rouge sont fixés dans le firmware, identiques sur tout
+le parc ; neutre garde la couleur de la tuile.
+
+**Vérifiez l'aperçu.** Il montre la valeur réelle, mise en forme par la même
+fonction que l'API. Pour une porte ou une serrure, rien dans Jeedom ne fixe ce
+que veut dire « 1 » : un avertissement le rappelle, et « Inverser » corrige.
+
+**Péremption** : la tuile affiche « — » si l'équipement de la commande est
+désactivé ou en alerte de communication Jeedom (délai maximal entre deux
+communications, réglé sur l'équipement). Une valeur numérique périme aussi au-delà
+de 60 min sans collecte ; binaire et texte n'ont pas de seuil par défaut. Le champ
+« Périmée après » règle ce seuil par tuile (0 = jamais).
+
+Seule une carte de schéma 3 (firmware 2.3.x et suivants) dessine ces tuiles ; une carte plus
+ancienne ne les reçoit pas.
+
+### Lecture seule — v3.0
+
+Case de l'onglet Écran. L'écran affiche mais ne commande rien : la carte de
+schéma 3 n'envoie plus d'appui, et **le plugin refuse tout appui venant de cet
+écran**, quel que soit son firmware. La navigation reste possible.
+
 ## Enrôler une carte neuve
 
 Une carte flashée mais pas encore déclarée reçoit `unknown_device` et **affiche
@@ -118,14 +154,20 @@ firmware de chaque carte : une carte n'a aucun moyen de la redemander.
 
 Le bouton **Voir ce que la carte reçoit** affiche la réponse `layout` exacte,
 telle qu'elle est servie à l'instant. C'est le moyen de vérifier une
-configuration sans avoir l'écran sous la main — un bouton dont la commande a été
-supprimée disparaît de cette réponse alors que le formulaire, lui, n'a pas
-changé d'apparence.
+configuration sans avoir l'écran sous la main. Elle donne aussi la
+correspondance id → bouton de chaque schéma.
+
+Un bouton dont la commande a été supprimée ou recréée **garde sa place**, inerte
+(pastille vide, appui refusé par `unknown_button`), et le journal le signale une
+fois. Le retirer décalerait tous les `id` suivants, et un appui jouerait le
+bouton d'à côté (contrat v3.0). Un appui est aussi refusé si le bouton à ce rang
+a changé depuis la dernière mise en page servie à la carte.
 
 ## Le contrat d'API
 
-Le plugin implémente le contrat v1.4 partagé avec le firmware. Quatre actions,
-toutes en GET, toutes authentifiées.
+Le plugin implémente le contrat v3.0 partagé avec le firmware. Des actions en
+GET, toutes authentifiées par la clé API, sauf le téléchargement `fwfile`
+qu'autorise un jeton à durée de vie courte.
 
 > **Ajouté en v1.4 :** `action=firmware`, la mise à jour par le réseau, et le
 > double verrou qui décide quel écran la reçoit — voir « Mise à jour du
@@ -211,11 +253,129 @@ sinon la pastille périmée jusqu'au prochain rechargement complet.
 Les deux tableaux sont construits à partir du même parcours filtré côté plugin :
 ils ne peuvent pas se décaler.
 
+#### `rssi`, optionnel — contrat v2.1
+
+La carte peut joindre à son `ping` le niveau Wi-Fi qu'elle mesure, en dBm :
+
+```bash
+curl -s -H "X-GLOWSCREEN32-APIKEY: <clé>" \
+  "http://<box>/plugins/glowscreen32/core/php/api.php?action=ping&device=246f28123456&rssi=-64"
+```
+
+Il alimente la commande **Niveau Wi-Fi**. Une valeur absente, non numérique ou
+hors de l'intervalle **−120 à 0** est ignorée **sans erreur** : un diagnostic mal
+formé ne doit jamais coûter sa liaison à un écran — le plugin couperait
+justement celui qu'il cherche à diagnostiquer.
+
+Aucun champ de réponse ne change, et **le numéro de schéma reste 2** : un
+paramètre de requête qu'un serveur ne connaît pas, il l'ignore. Une carte v2.1
+qui l'envoie à un plugin v2.0 est servie exactement comme avant.
+
+#### Cadence — précisée en v2.1
+
+La carte suit `poll` écran allumé, et peut espacer jusqu'à **2 × `poll`** quand
+son écran est atténué — personne ne le regarde. Elle émet en revanche un `ping`
+**immédiat au réveil**, si bien que les pastilles vues par quelqu'un qui
+s'approche sont toujours fraîches.
+
+C'est pourquoi le seuil « hors ligne » se compte sur **3 × 2 × `poll`** : le
+calculer sur `poll` seul ferait passer tout le parc hors ligne chaque nuit.
+
+#### Attente longue — contrat v2.2, schéma 2
+
+Les réponses `layout` et `ping` du schéma 2 portent, en fin de réponse :
+
+```json
+"features": { "wait": 25, "cmd": true }, "rev": "a41f09c2"
+```
+
+Une carte v2.2 relance son `ping` avec `&wait=<s>&rev=<dernière rev reçue>`. Si
+`rev` est encore la valeur courante et qu'aucune commande n'attend, le plugin
+**retient** la requête jusqu'à ce que quelque chose change — un état de bouton,
+le bandeau (y compris sa péremption), `version`, la file de commandes — ou que
+`wait` secondes (25 au plus) s'écoulent. La réponse est calculée au moment où
+elle part. Sans `wait`, sans `rev`, ou avec une `rev` différente : réponse
+immédiate, comme en v2.1. Le schéma 1 n'est jamais retenu.
+
+Pendant la retenue, le plugin relit un petit fichier de réveil
+(`/tmp/jeedom/glowscreen32/wake-<id>`) quatre fois par seconde, **sans requête
+SQL**. Un *listener* Jeedom posé sur les commandes d'état des boutons et sur
+celle du bandeau le fait bouger ; l'enregistrement de l'écran et la mise en file
+d'une commande aussi. La `rev` est de toute façon recalculée toutes les cinq
+secondes, ce qui attrape la péremption du bandeau. Une nouvelle requête du même
+écran **libère** la précédente. Le contact et les diagnostics sont notés à
+l'**arrivée** de la requête.
+
+#### Commandes à distance — contrat v2.2
+
+Une réponse `ping` du schéma 2 peut porter **une** commande :
+
+```json
+"cmd": { "seq": 17, "do": "message", "text": "On sonne au portail", "duration": 30 }
+```
+
+| `do` | Arguments, bornés par le plugin |
+|---|---|
+| `reboot` | — |
+| `identify` | `duration` 1–120 s (10) |
+| `message` | `text` ≤ 64 caractères, `duration` 1–600 s (30) |
+| `page` | `page` 0–3 |
+| `calibrate` | — |
+| `ota` | — (toujours soumis aux deux verrous) |
+| `wifi` | `ssid` ≤ 32, `pass` ≤ 64 — **page de l'équipement uniquement** |
+
+File de **8** commandes par écran (la plus ancienne est abandonnée et
+journalisée), durée de vie **10 minutes**, livraison **au plus une fois** : la
+commande est retirée de la file au moment où elle part. `seq` croît par écran et
+survit à un redémarrage de Jeedom (il est rangé dans la configuration du
+plugin).
+
+#### Diagnostics — contrat v2.2
+
+`&up=86400&rst=poweron&heap=142336&blk=86004&ip=192.168.20.42&ssid=MonReseau` :
+durée de fonctionnement, cause du dernier redémarrage (`poweron`, `sw`, `panic`,
+`wdt`, `brownout`, `ext`, `other`), tas libre et plus gros bloc (0–400 000
+octets), adresse IPv4, réseau (≤ 32 caractères). Même règle que `rssi` : absent,
+mal formé ou hors bornes → **ignoré sans erreur**.
+
+#### L'API n'enregistre jamais l'équipement — v2.2
+
+Aucun appel de carte ne réenregistre l'eqLogic : contact, firmware, diagnostics
+et péremption du bandeau vont dans des commandes d'information ou dans le cache.
+Jusqu'en v2.1, une configuration enregistrée pendant qu'une carte appelait
+pouvait être écrasée ; avec un `ping` retenu 25 s, ce serait devenu la règle.
+
+#### Schéma 3 — tuiles « valeur » et lecture seule (v3.0)
+
+| En-tête `X-GLOWSCREEN32-SCHEMA` | Réponse |
+|---|---|
+| absent, vide, `1` | schéma 1, octet pour octet |
+| `2` | schéma 2 **sans aucune tuile « valeur »**, `id` recalculés |
+| `3` ou plus | schéma 3 |
+
+Une tuile `view` du `layout` :
+
+```json
+{ "id": 4, "slot": 4, "label": "Porte", "color": "#34495e", "icon": "door",
+  "mode": "view", "state": null, "value": "Ouverte", "tone": "warn" }
+```
+
+Le `ping` du schéma 3 ajoute `values`, de même longueur que `states` : `null`
+hors tuile valeur, `{"v": "Ouverte", "t": "warn"}` sinon. `rev` couvre `values`.
+`ui.readonly` apparaît en schéma 3 ; un écran en lecture seule voit **tous** ses
+`press` refusés (`403 read_only`), quel que soit son schéma. Un `press` sur une
+tuile valeur rend `unknown_button`.
+
+⚠ Les `id` d'un même bouton diffèrent d'un schéma à l'autre : un `id` n'a de sens
+que dans le schéma où il a été reçu. « Voir ce que la carte reçoit » montre les
+trois réponses.
+
 ### Erreurs
 
 | `error` | HTTP | Cause |
 |---|---|---|
 | `bad_apikey` | 401 | clé absente ou invalide |
+| `read_only` | 403 | `press` sur un écran en lecture seule (v3.0) |
 | `unknown_device` | 404 | aucun écran pour cette MAC, ou écran désactivé |
 | `unknown_button` | 404 | identifiant de bouton inconnu pour cet écran |
 | `firmware_unavailable` | 404 | une mise à jour est annoncée mais le binaire a disparu du dépôt |
@@ -249,13 +409,15 @@ Mise à jour disponible :
   "ok": true,
   "update": true,
   "version": "1.4.0",
-  "url": "http://192.168.1.10/plugins/glowscreen32/data/firmware/glowscreen32-1.4.0.bin",
+  "url": "http://192.168.1.10/plugins/glowscreen32/core/php/api.php?action=fwfile&token=629fa993…",
   "sha256": "0fbb3369…",
   "size": 1002288
 }
 ```
 
-La carte télécharge l'URL, vérifie **l'empreinte SHA-256 avant de basculer**,
+La carte télécharge l'URL telle quelle — un jeton valable 15 minutes, lié au
+binaire déposé (empreinte SHA-256) et refusé si l'un des deux verrous a été
+refermé depuis —, vérifie **l'empreinte SHA-256 avant de basculer**,
 écrit dans la partition inactive et redémarre dessus.
 
 La version annoncée est retenue à **n'importe quel** appel qui porte `fw`, y
@@ -386,8 +548,8 @@ plus de raison d'être et a disparu.
 
 ## Les commandes de l'équipement
 
-Quatre informations, écrites au fil des échanges avec la carte. Aucune n'est
-nécessaire au dialogue : elles existent pour que l'écran soit un équipement
+Des informations écrites au fil des échanges avec la carte, et, depuis la
+v2.2, des actions. Aucune information n'est nécessaire au dialogue : elles existent pour que l'écran soit un équipement
 ordinaire sur le dashboard, et qu'un scénario puisse réagir à un appui.
 
 | Commande | Sens |
@@ -396,22 +558,60 @@ ordinaire sur le dashboard, et qu'un scénario puisse réagir à un appui.
 | Dernier contact | horodaté à chaque appel reçu, `layout` comme `ping` |
 | Dernier bouton | le libellé du dernier bouton appuyé |
 | Version du firmware | la version que la carte annonce, écrite seulement quand elle change |
+| **En ligne** | binaire, v2.1 — 1 dès qu'un appel arrive, 0 quand le cron constate le silence |
+| **Niveau Wi-Fi** | numérique en dBm, v2.1 — le `rssi` annoncé par la carte au `ping` |
+| Durée de fonctionnement | v2.2 — secondes depuis le démarrage de la carte (`up`) |
+| Cause du redémarrage | v2.2 — `poweron`, `sw`, `panic`, `wdt`, `brownout`, `ext`, `other` |
+| Mémoire libre, Plus gros bloc libre | v2.2 — octets, **historisés** ; le second mesure la fragmentation |
+| Adresse IP, Réseau Wi-Fi | v2.2 — où est l'écran sur le réseau |
+| **Redémarrer, Identifier, Message, Page, Calibrer, Vérifier firmware** | actions, v2.2 — mettent une commande à distance en file ; utilisables depuis un scénario. Message : le champ « titre » porte la durée en secondes (30 si vide) |
 
-**Dernier contact** est la façon de savoir si un écran est en ligne. Il est
-écrit à deux endroits : la commande d'information ci-dessus, et la
-**configuration de l'équipement** (`getConfiguration('lastcontact')`), qui est
-la source que le plugin consulte lui-même. La version 1.0 ne l'écrivait que dans
-la commande, si bien que la configuration restait vide sur un écran qui
-dialoguait pourtant parfaitement.
+Le changement de Wi-Fi n'est **pas** une commande Jeedom : il fait transiter un
+mot de passe, et ne part que du cadre « Changer le Wi-Fi de la carte » de
+l'onglet Écran, par un administrateur.
+
+### En ligne — v2.1
+
+Jusqu'ici, « l'écran du couloir ne répond plus » n'avait de réponse que dans le
+tableau du parc, sur la page du plugin. Aucun scénario ne pouvait réagir à un
+panneau mural devenu noir ; il fallait passer devant pour s'en apercevoir.
+
+La commande **En ligne** en fait un fait Jeedom ordinaire : historisable,
+affichable, utilisable en déclencheur. Elle passe à 1 dès qu'un appel arrive, et
+c'est un **cron d'une minute** qui la remet à 0 — un écran hors ligne est
+justement celui qui n'appelle plus, il n'y a personne pour poser le zéro à sa
+place. Les deux transitions laissent une ligne de journal, et elles seules.
+
+### Niveau Wi-Fi — v2.1
+
+La qualité de la liaison est la première cause de panne du projet, et la plus
+trompeuse : les `ping` passent encore là où un `press` se perd (−88 dBm) et où
+un OTA meurt à 2 % (−92/−93 dBm). Tout a donc l'air de fonctionner.
+
+Le firmware affiche déjà le niveau au bandeau sous **−75 dBm**, mais il faut se
+tenir devant l'écran pour le lire — sur un panneau mural, au fond d'un couloir,
+c'est précisément ce qu'on ne fait pas. Remonté ici, il devient lisible depuis
+le dashboard, et permet de **prévenir avant** de lancer un OTA sur une liaison
+qui ne le supportera pas.
+
+**Dernier contact** est la façon de savoir si un écran est en ligne. Depuis la
+v2.2 il n'est écrit **que** dans cette commande d'information : la v2.1
+l'écrivait aussi dans la configuration de l'équipement, ce qui imposait de
+réenregistrer l'eqLogic à chaque contact — et écrasait toute configuration
+enregistrée pendant ce temps. La valeur v2.1 de la configuration reste lue en
+repli, pour un écran qui n'a pas rappelé depuis la mise à jour.
 
 Il est arrondi **à la minute**, et c'est délibéré : une carte interroge toutes
-les trente secondes, et horodater chaque appel ferait une écriture en base par
+les trente secondes, et horodater chaque appel ferait un événement Jeedom par
 écran et par demi-minute pour une information dont personne ne lit la seconde.
 Un appui, lui, est rare et intéressant : il est toujours écrit.
 
 La page du plugin l'affiche en clair — « 22/09/2026 11:20:07 (il y a 2 min) » —
 dans l'onglet Écran et dans le tableau du parc, avec une étiquette **hors
-ligne** au-delà de trois intervalles de rafraîchissement sans nouvelle.
+ligne** au-delà de **trois intervalles maximaux** sans nouvelle, soit
+`3 × 2 × poll` depuis la v2.1 : la carte espace ses pings quand son écran est
+atténué, et compter sur `poll` seul ferait passer tout le parc hors ligne chaque
+nuit.
 
 ## Journal
 

@@ -3,8 +3,8 @@
 Drives ESP32 touch screens from Jeedom.
 
 One plugin device = **one** physical screen, identified by the MAC address of
-its board. The screen shows up to six buttons; you decide in Jeedom what each
-one triggers. The board fetches its layout at boot, then reports presses.
+its board. The screen shows up to thirty-two buttons and tiles over four pages;
+you decide in Jeedom what each one triggers or shows. The board fetches its layout at boot, then reports presses.
 
 The fleet is multi-screen by design: create as many devices as you have
 screens, each with its own MAC and its own buttons. **The firmware is identical
@@ -66,8 +66,8 @@ row *GlowScreen32*.
 
 ## API contract
 
-The plugin implements the v1.4 contract shared with the firmware: four GET
-actions, all authenticated.
+The plugin implements the 3.0 contract shared with the firmware: GET actions,
+all authenticated by the API key except the token-protected `fwfile` download.
 
 > **Changed in v1.3:** `id` is no longer a Jeedom command id, it is the
 > **button's rank** in the layout (0 to 5). The board treats it as opaque and
@@ -86,9 +86,21 @@ curl -s -H "X-GLOWSCREEN32-APIKEY: <key>" \
 | `error` | HTTP | Cause |
 |---|---|---|
 | `bad_apikey` | 401 | key missing or invalid |
+| `read_only` | 403 | `press` on a read-only screen (3.0) |
 | `unknown_device` | 404 | no screen for this MAC, or screen disabled |
 | `unknown_button` | 404 | rank outside this screen's layout |
 | `bad_request` | 400 | missing parameter, malformed MAC, or unknown action |
+
+`ping` takes an optional `&rssi=-64` parameter (contract 2.1): the Wi-Fi level
+the board measures, in dBm, feeding the **Wi-Fi level** command. Anything
+missing, non-numeric or outside **−120 to 0** is ignored **without an error** —
+a malformed diagnostic must never cost a screen its link. No response field
+changes and **the schema number stays 2**.
+
+The board follows `poll` while its screen is lit, may stretch to **2 × `poll`**
+once dimmed, and always pings **immediately on wake**. The offline threshold is
+therefore counted on `3 × 2 × poll`; counting on `poll` alone would take the
+whole fleet offline every night.
 
 `ping` also returns a `states` array, in the same order as the `layout`
 buttons, giving each button's current state. It is what keeps the screen's
@@ -109,6 +121,51 @@ of truth remains the `states` array of the next `ping`.
 A button that starts a scenario is a plain-action button targeting a scenario;
 since ids are ranks, it needs no special convention (the negative-id convention
 of 1.0 is gone).
+
+### Contract 2.2 — long polling, remote commands, diagnostics
+
+Schema 2 `layout` and `ping` answers end with
+`"features": {"wait": 25, "cmd": true}` and `"rev": "a41f09c2"`. A 2.2 board
+resends `ping` with `&wait=<s>&rev=<last rev>`; if `rev` is still current and no
+command is queued, the plugin **holds** the request until a button state, the
+banner (staleness included), `version` or the command queue changes, or `wait`
+seconds (25 at most) elapse. Without `wait`/`rev`, or with a different `rev`:
+immediate answer, as in 2.1. Schema 1 is never held and never changes.
+
+While holding, the plugin rereads a small wake file
+(`/tmp/jeedom/glowscreen32/wake-<id>`) four times a second, **without any SQL
+query**; a Jeedom listener on the buttons' state commands and the banner command
+moves it, and `rev` is recomputed every five seconds regardless. A new request
+from the same screen releases the previous one. Contact and diagnostics are
+recorded when the request **arrives**.
+
+A schema 2 `ping` may carry **one** remote command, e.g.
+`"cmd": {"seq": 17, "do": "message", "text": "…", "duration": 30}` — verbs
+`reboot`, `identify` (1–120 s), `message` (≤ 64 chars, 1–600 s), `page` (0–3),
+`calibrate`, `ota`, `wifi` (device page only). Queue of 8 per screen, 10-minute
+lifetime, **at-most-once** delivery, per-screen persistent `seq`.
+
+Optional diagnostics on `ping`: `up`, `rst`, `heap`, `blk`, `ip`, `ssid` — ignored
+without error when missing or malformed, like `rssi`.
+
+**The API never saves the device.** Contact, firmware, diagnostics and banner
+staleness go to info commands or the cache: a held 25 s request re-saving the
+device as loaded on arrival would overwrite any configuration saved meanwhile.
+
+### Contract 3.0 — schema 3, value tiles, read-only screens
+
+Header `3` → schema 3; `2` → schema 2 **without any value tile**, `id`s
+recomputed; `1`/none → schema 1 byte for byte. A **Value** tile (`mode: "view"`)
+shows an info command: the plugin formats `value` (≤ 16 chars) and `tone`
+(`neutral`, `ok`, `warn`, `alert`) — binary labels/tones/invert, numeric unit,
+decimals and ascending thresholds, text value → label table — prefilled from the
+Jeedom generic type, with a live preview of the real value in the page. It shows
+"—" when the device is disabled or in communication alert, and, for numeric
+values, after 60 min without collection (configurable). Schema 3 `ping` adds
+`values` (same length as `states`), covered by `rev`. A **read-only** screen
+(`ui.readonly`) has every `press` refused with `403 read_only`, whatever its
+schema; a `press` on a value tile answers `unknown_button`. The same button has
+different `id`s in different schemas.
 
 ## Over-the-air firmware updates
 
@@ -153,9 +210,27 @@ which lock blocked it.
 | Command | Meaning |
 |---|---|
 | Layout version | the counter the board watches |
-| Last contact | stamped on every call received, `layout` as well as `ping`, rounded to the minute |
+| Last contact | stamped on every call received, `layout` as well as `ping`, rounded to the minute — since 2.2 the only place it is written |
 | Last button | the label of the last button pressed |
 | Firmware version | the version the board reports, written only when it changes |
+| **Online** | binary, 2.1 — 1 as soon as a call arrives, 0 when the one-minute cron notices the silence |
+| **Wi-Fi level** | numeric, dBm, 2.1 — the `rssi` the board reports on `ping` |
+| Uptime, Reset cause | 2.2 — `up` and `rst` from `ping` |
+| Free heap, Largest free block | 2.2 — bytes, **historized** (Wi-Fi level too) |
+| IP address, Wi-Fi network | 2.2 — where the screen sits on the network |
+| **Reboot, Identify, Message, Page, Calibrate, Check firmware** | actions, 2.2 — queue a remote command; usable from scenarios. Message: the "title" field holds the duration in seconds (30 if empty) |
+
+Changing the Wi-Fi is **not** a Jeedom command: it carries a password, and can
+only be sent by an administrator from the device page.
+
+**Online** turns a dark wall panel into an ordinary Jeedom fact: a scenario can
+finally react to it. Until 2.1 the answer lived only in the plugin's own screen
+table, so noticing meant walking past the panel.
+
+**Wi-Fi level** is the project's leading cause of failure and its most
+misleading one: `ping` still gets through where a `press` is lost (−88 dBm) and
+where an OTA dies at 2 % (−92/−93 dBm). The banner shows it below −75 dBm, but
+only to someone standing in front of the screen.
 
 ## Log
 

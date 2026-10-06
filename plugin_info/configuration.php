@@ -63,7 +63,7 @@ $gsFirmware = $gsOta['firmware'];
 						<?php foreach ($gsScreens as $gsScreen) { ?>
 							<tr<?php echo ($gsScreen['enable'] == 1) ? '' : ' class="disableCard"'; ?>>
 								<td>
-									<?php echo $gsScreen['name']; ?>
+									<?php /* Le nom est une saisie libre : échappé (v2.2). */ echo htmlspecialchars($gsScreen['name'], ENT_QUOTES, 'UTF-8'); ?>
 									<?php echo ($gsScreen['enable'] == 1) ? '' : ' <span class="label label-default">{{désactivé}}</span>'; ?>
 								</td>
 								<td><code><?php echo ($gsScreen['mac'] != '') ? $gsScreen['mac'] : '—'; ?></code></td>
@@ -100,7 +100,7 @@ $gsFirmware = $gsOta['firmware'];
 					</tbody>
 				</table>
 			</div>
-			<span class="help-block" style="margin:0;">{{Le dernier contact est horodaté à chaque appel reçu de la carte, « layout » comme « ping », et arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle. Un écran sans adresse MAC n'est joignable par aucune carte.}}</span>
+			<span class="help-block" style="margin:0;">{{Le dernier contact est horodaté à chaque appel reçu de la carte, « layout » comme « ping », et arrondi à la minute, dans la commande « Dernier contact » de l'écran. « Hors ligne » s'affiche au-delà de 3 × 2 × poll secondes sans nouvelle (plus une minute de marge) : une carte dont l'écran est atténué a le droit d'espacer ses appels jusqu'à 2 × poll, et un seuil plus court ferait passer tout le parc hors ligne chaque nuit. Un écran sans adresse MAC n'est joignable par aucune carte.}}</span>
 		<?php } ?>
 	</fieldset>
 

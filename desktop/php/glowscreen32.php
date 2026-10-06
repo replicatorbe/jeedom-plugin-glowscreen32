@@ -202,6 +202,9 @@ $gsFirmware = $gsOta['firmware'];
 							<th style="width:230px;">{{Dernier contact}}</th>
 							<th style="width:120px;">{{Firmware}}</th>
 							<th style="width:150px;">{{Verrou OTA}}</th>
+							<th style="width:130px;">{{Adresse IP}}</th>
+							<th style="width:120px;">{{En marche depuis}}</th>
+							<th style="width:120px;">{{Dernier redémarrage}}</th>
 							<th style="width:70px;">{{Pages}}</th>
 							<th style="width:80px;">{{Boutons}}</th>
 							<th style="width:80px;">{{Version}}</th>
@@ -210,7 +213,7 @@ $gsFirmware = $gsOta['firmware'];
 					<tbody id="tbody_glowscreen32Fleet">
 						<?php foreach ($gsOta['screens'] as $gsScreen) { ?>
 							<tr data-gs-ota-allowed="<?php echo $gsScreen['ota'] ? 1 : 0; ?>">
-								<td><?php echo $gsScreen['name']; ?><?php echo ($gsScreen['enable'] == 1) ? '' : ' <span class="label label-default">{{désactivé}}</span>'; ?></td>
+								<td><?php echo htmlspecialchars($gsScreen['name'], ENT_QUOTES, 'UTF-8'); ?><?php echo ($gsScreen['enable'] == 1) ? '' : ' <span class="label label-default">{{désactivé}}</span>'; ?></td>
 								<td><code><?php echo ($gsScreen['mac'] != '') ? $gsScreen['mac'] : '—'; ?></code></td>
 								<td>
 									<?php if ($gsScreen['human'] == '') { ?>
@@ -243,6 +246,18 @@ $gsFirmware = $gsOta['firmware'];
 										<span class="label label-default">{{fermé (global)}}</span>
 									<?php } ?>
 								</td>
+								<!-- v2.2 : les diagnostics que la carte joint à son ping. Une
+								     cause « panic » ou « wdt » signale un firmware qui plante sans
+								     que personne ne le voie. -->
+								<td><?php echo ($gsScreen['ip'] != '') ? '<code>' . htmlspecialchars($gsScreen['ip'], ENT_QUOTES, 'UTF-8') . '</code>' : '—'; ?></td>
+								<td><?php echo ($gsScreen['uptimeHuman'] != '') ? htmlspecialchars($gsScreen['uptimeHuman'], ENT_QUOTES, 'UTF-8') : '—'; ?></td>
+								<td>
+									<?php if ($gsScreen['rst'] == '') { ?>
+										—
+									<?php } else { ?>
+										<span class="label <?php echo in_array($gsScreen['rst'], array('panic', 'wdt', 'brownout'), true) ? 'label-danger' : 'label-default'; ?>"><?php echo htmlspecialchars($gsScreen['rst'], ENT_QUOTES, 'UTF-8'); ?></span>
+									<?php } ?>
+								</td>
 								<td><?php echo $gsScreen['pages']; ?></td>
 								<td><?php echo $gsScreen['buttons']; ?></td>
 								<td><?php echo $gsScreen['version']; ?></td>
@@ -251,7 +266,7 @@ $gsFirmware = $gsOta['firmware'];
 					</tbody>
 				</table>
 			</div>
-			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping ». Il est arrondi à la minute : une carte interroge toutes les trente secondes, et horodater chaque appel ferait une écriture en base pour une information dont personne ne lit la seconde. « Hors ligne » s'affiche au-delà de trois intervalles de rafraîchissement sans nouvelle. La colonne « Firmware » est la version que la carte elle-même annonce ; « Verrou OTA » est le résultat des DEUX verrous, celui du plugin et celui de l'écran — c'est avec ces deux colonnes qu'on pilote un déploiement progressif.}}</span>
+			<span class="help-block" style="margin:0 5px 10px 5px;">{{Le dernier contact est horodaté à chaque appel reçu, « layout » comme « ping », arrondi à la minute, dans la commande « Dernier contact ». « Hors ligne » s'affiche au-delà de 3 × 2 × poll secondes sans nouvelle (plus une minute de marge) : une carte dont l'écran est atténué a le droit d'espacer ses appels jusqu'à 2 × poll, et un seuil plus court ferait passer tout le parc hors ligne chaque nuit. Adresse IP, durée de fonctionnement et cause du dernier redémarrage sont annoncées par la carte elle-même (firmware v2.2). La colonne « Firmware » est la version que la carte elle-même annonce ; « Verrou OTA » est le résultat des DEUX verrous, celui du plugin et celui de l'écran — c'est avec ces deux colonnes qu'on pilote un déploiement progressif.}}</span>
 		<?php } ?>
 
 		<!-- ========================= FIRMWARE / OTA ========================= -->
@@ -443,6 +458,15 @@ $gsFirmware = $gsOta['firmware'];
 								</div>
 							</div>
 							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Lecture seule}}</label>
+								<div class="col-sm-2">
+									<input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="readonly">
+								</div>
+								<div class="col-sm-7">
+									<span class="help-block" style="margin:0;">{{L'écran affiche, mais ne commande rien : le plugin refuse tout appui venant de lui (erreur read_only), quel que soit son firmware — même un firmware défectueux ou une clé API dérobée ne peuvent pas ouvrir le portail depuis cet écran. La navigation entre pages reste possible. Pour une entrée, un garage, un couloir.}}</span>
+								</div>
+							</div>
+							<div class="form-group">
 								<label class="col-sm-3 control-label">{{Bandeau}}</label>
 								<div class="col-sm-6">
 									<div class="input-group">
@@ -483,6 +507,53 @@ $gsFirmware = $gsOta['firmware'];
 								<div class="col-sm-9">
 									<span class="form-control-static" id="span_glowscreen32Firmware">-</span>
 									<span class="help-block" style="margin:0;">{{La version que la carte a annoncée lors de son dernier appel. Elle vient de la carte, pas de Jeedom : tant qu'elle n'a pas interrogé un plugin qui sait la lire, elle reste inconnue.}}</span>
+								</div>
+							</div>
+						</fieldset>
+
+						<!-- v2.2 : ce que la carte dit d'elle-même, lu dans les commandes
+						     d'information (glowscreen32.ajax.php, action screenstate). -->
+						<fieldset>
+							<legend><i class="fas fa-stethoscope"></i> {{Diagnostics de la carte}}</legend>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Réseau}}</label>
+								<div class="col-sm-9"><span class="form-control-static" id="span_glowscreen32Net">-</span></div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Fonctionnement}}</label>
+								<div class="col-sm-9"><span class="form-control-static" id="span_glowscreen32Run">-</span></div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Mémoire}}</label>
+								<div class="col-sm-9">
+									<span class="form-control-static" id="span_glowscreen32Mem">-</span>
+									<span class="help-block" style="margin:0;">{{Annoncés par la carte à chaque appel, à partir du firmware 2.2. Le plus gros bloc libre mesure la fragmentation : sans PSRAM, c'est lui qui finit par faire échouer une allocation.}}</span>
+								</div>
+							</div>
+						</fieldset>
+
+						<fieldset>
+							<legend><i class="fas fa-wifi"></i> {{Changer le Wi-Fi de la carte}}</legend>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Réseau (SSID)}}</label>
+								<div class="col-sm-4">
+									<!-- PAS des .eqLogicAttr : ces deux champs ne doivent jamais être
+									     enregistrés dans la configuration de l'équipement. -->
+									<input type="text" class="form-control" id="in_glowscreen32WifiSsid" maxlength="32" autocomplete="off">
+								</div>
+							</div>
+							<div class="form-group">
+								<label class="col-sm-3 control-label">{{Mot de passe}}</label>
+								<div class="col-sm-4">
+									<input type="password" class="form-control" id="in_glowscreen32WifiPass" maxlength="64" autocomplete="new-password">
+								</div>
+								<div class="col-sm-5">
+									<a class="btn btn-sm btn-warning" id="bt_glowscreen32Wifi"><i class="fas fa-paper-plane"></i> {{Envoyer à la carte}}</a>
+								</div>
+							</div>
+							<div class="form-group">
+								<div class="col-sm-offset-3 col-sm-9">
+									<span class="help-block" style="margin:0;">{{La carte essaie les nouveaux identifiants et, sans connexion sous 60 secondes, revient aux précédents. La commande est livrée au prochain appel de la carte, au plus une fois ; sans appel sous 10 minutes, elle expire. Le mot de passe n'est ni enregistré dans l'équipement, ni journalisé, ni placé dans le cache de Jeedom : il attend sa livraison dans un fichier lisible du seul serveur web (plugins/glowscreen32/data/secrets, exclu des sauvegardes), effacé dès la livraison ou à l'expiration. Il transite ensuite en clair sur le réseau local, comme la clé API. Mot de passe : vide (réseau ouvert), 8 à 63 caractères, ou une clé de 64 chiffres hexadécimaux. Firmware 2.2 ou plus récent requis.}}</span>
 								</div>
 							</div>
 						</fieldset>
@@ -563,7 +634,7 @@ $gsFirmware = $gsOta['firmware'];
 					<fieldset>
 						<legend><i class="fas fa-desktop"></i> {{Aperçu}}</legend>
 						<div class="glowscreen32Grid" id="div_glowscreen32Preview"></div>
-						<span class="help-block">{{La page en cours d'édition, sur un écran 320×240, telle que la carte la dessinera : la grille suit le réglage de l'onglet « Écran ». L'aperçu suit la saisie ; il ne dit rien de l'état des lampes, que seule la carte connaît. L'identifiant sous chaque tuile est l'id GLOBAL du contrat v2, celui que la carte renvoie à « press » — il est continu sur tout l'écran, pages comprises.}}</span>
+						<span class="help-block">{{La page en cours d'édition, sur un écran 320×240, telle que la carte la dessinera : la grille suit le réglage de l'onglet « Écran ». L'aperçu suit la saisie ; il ne dit rien de l'état des lampes, que seule la carte connaît. L'identifiant sous chaque tuile est l'id du SCHÉMA 3 (firmware 2.3 et suivants), continu sur tout l'écran, pages comprises — celui que la carte renvoie à « press ». Une carte plus ancienne reçoit d'autres id : en schéma 2, les tuiles « valeur » sont retirées et la numérotation recalculée ; en schéma 1, seuls les six premiers boutons sont envoyés. « Voir ce que la carte reçoit » donne la correspondance de chaque schéma. ⚠ signale une commande sensible (portail, porte, garage, serrure, alarme).}}</span>
 						<a class="btn btn-default btn-sm" id="bt_glowscreen32Preview"><i class="fas fa-code"></i> {{Voir ce que la carte reçoit}}</a>
 						<pre id="pre_glowscreen32Payload" style="display:none;margin-top:10px;max-height:400px;overflow:auto;font-size:11px;"></pre>
 					</fieldset>

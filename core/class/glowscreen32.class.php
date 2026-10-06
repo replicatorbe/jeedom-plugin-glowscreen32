@@ -70,7 +70,12 @@ class glowscreen32 extends eqLogic {
      * recevoir l'OTA qui le réparerait.
      */
     const SCHEMA_LEGACY  = 1;
-    const SCHEMA_CURRENT = 2;
+    /* v3.0 : le schéma 2 reste servi — SANS aucune tuile « view », que la
+     * carte prendrait pour un bouton — et SCHEMA_CURRENT passe à 3. Tout ce
+     * qui vaut « schéma 2 ou plus » (features, rev, attente longue, commandes
+     * à distance) se teste sur SCHEMA_V2, jamais sur SCHEMA_CURRENT. */
+    const SCHEMA_V2      = 2;
+    const SCHEMA_CURRENT = 3;
 
     /* Plafond de la réponse, côté firmware (JEEDOM_JSON_MAX). Le dépassement
      * n'est pas tronqué ici — il n'y a rien à tronquer qui garde un sens — mais
@@ -168,6 +173,44 @@ class glowscreen32 extends eqLogic {
     const MIN_POLL     = 5;
     const MAX_POLL     = 3600;
 
+    /*
+     * Facteur d'espacement du « ping » quand l'écran est ATTÉNUÉ — contrat v2.1.
+     *
+     * La carte suit « poll » écran allumé, et se donne le droit d'espacer
+     * jusqu'à 2 x poll quand plus personne ne le regarde. Elle émet en revanche
+     * un ping IMMÉDIAT au réveil, si bien que les pastilles vues par quelqu'un
+     * qui s'approche sont toujours fraîches.
+     *
+     * ⚠ CETTE CONSTANTE EST LA MÊME DES DEUX CÔTÉS (UI_IDLE_POLL_FACTOR dans
+     * theme.h). Le facteur d'espacement et le seuil de détection hors ligne
+     * sont LE MÊME RÉGLAGE VU DES DEUX BOUTS : les laisser diverger ferait
+     * « disparaître » tout le parc chaque nuit alors que chaque carte
+     * fonctionne parfaitement — c'est-à-dire produirait une alerte à laquelle
+     * on cesse de croire, ce qui est pire que pas d'alerte du tout.
+     */
+    const IDLE_POLL_FACTOR = 2;
+
+    /*
+     * Le niveau de réception Wi-Fi annoncé par la carte — contrat v2.1,
+     * paramètre optionnel de « ping ».
+     *
+     * Les bornes ne sont pas décoratives : elles écartent une valeur aberrante
+     * sans refuser le ping. Un diagnostic mal formé ne doit JAMAIS coûter sa
+     * liaison à un écran.
+     */
+    const RSSI_MIN = -120;
+    const RSSI_MAX = 0;
+
+    /*
+     * Seuil d'alerte précoce, en dBm. Identique à UI_RSSI_WEAK_DBM côté
+     * firmware, et choisi sur des relevés de terrain, pas au jugé : un « press »
+     * a été perdu vers -88 dBm et un OTA est mort à 2 % vers -92/-93 dBm, alors
+     * que les « ping » passaient encore dans les deux cas. Prévenir à -75 dBm
+     * laisse le temps de déplacer un répéteur avant que l'écran ne devienne
+     * inutilisable.
+     */
+    const RSSI_WEAK = -75;
+
     /* La couleur d'un bouton auquel on n'en a pas donné. Le bleu de référence
      * du contrat, pour qu'un écran non peint reste cohérent avec la maquette. */
     const DEFAULT_COLOR = '#2D7FF9';
@@ -200,6 +243,27 @@ class glowscreen32 extends eqLogic {
      * ligne de journal.
      */
     const MODE_NAV = 'nav';
+
+    /*
+     * MODE_VIEW — contrat v3.0, schéma 3. Une tuile qui MONTRE au lieu
+     * d'agir : l'état d'une porte, de l'alarme, une température. Elle
+     * ne déclenche rien, n'émet jamais de « press », et n'est servie QU'EN
+     * SCHÉMA 3 : une carte de schéma 2 la prendrait pour un bouton. Le plugin
+     * met la valeur en forme (« value », ≤ 16 caractères) et lui donne un SENS
+     * (« tone ») ; la carte ne fait qu'afficher.
+     */
+    const MODE_VIEW = 'view';
+
+    /* Les sens d'une tuile « view ». Absent ou inconnu = neutral. */
+    const TONES = array('neutral', 'ok', 'warn', 'alert');
+    const VALUE_MAX = 16;
+    /* Seuil de péremption par défaut d'une tuile NUMÉRIQUE, en minutes.
+     * Binaire et texte : aucun par défaut (voir viewResult). */
+    const VIEW_NUMERIC_MAX_AGE = 60;
+    /* Nombre de seuils (numérique) et de lignes de correspondance (texte)
+     * qu'une tuile peut porter. */
+    const VIEW_THRESHOLDS = 3;
+    const VIEW_MAPS = 6;
 
     /* Les deux formes d'action qu'un bouton en mode « action » sait déclencher. */
     const TARGET_NONE     = '';
@@ -393,7 +457,7 @@ class glowscreen32 extends eqLogic {
             }
 
             $mode = isset($stored['mode']) ? (string) $stored['mode'] : self::MODE_ACTION;
-            if ($mode !== self::MODE_TOGGLE && $mode !== self::MODE_NAV) {
+            if ($mode !== self::MODE_TOGGLE && $mode !== self::MODE_NAV && $mode !== self::MODE_VIEW) {
                 $mode = self::MODE_ACTION;
             }
 
@@ -464,10 +528,62 @@ class glowscreen32 extends eqLogic {
                  * Facultative en mode « action », OBLIGATOIRE en mode
                  * « toggle » : sans elle, rien ne décide du sens. */
                 'state'    => self::trimCmd($stored, 'state'),
+                /* --- mode « view », contrat v3.0 --- */
+                /* La commande d'information montrée, et sa mise en forme. */
+                'view'     => self::trimCmd($stored, 'view'),
+                'fmt'      => self::sanitizeFmt(isset($stored['fmt']) ? $stored['fmt'] : array()),
             );
             $rank++;
         }
         return $buttons;
+    }
+
+    /* Un sens de tuile, ramené au vocabulaire fermé. */
+    public static function sanitizeTone($_tone, $_default = 'neutral') {
+        $tone = strtolower(trim((string) $_tone));
+        return in_array($tone, self::TONES, true) ? $tone : $_default;
+    }
+
+    /*
+     * La mise en forme d'une tuile « view » — contrat v3.0. Clés PLATES, en
+     * nombre fixe : le formulaire les envoie telles quelles, et rien de ce qui
+     * n'est pas ici n'est conservé.
+     *
+     *   invert, l0/t0, l1/t1      binaire : libellé et sens pour 0 et pour 1
+     *   unit (null = celle de la commande), dec ('' = automatique), base,
+     *   th1v/th1t … th3v/th3t     numérique : seuils croissants → sens
+     *   m1v/m1l/m1t … m6v/m6l/m6t texte : valeur → libellé + sens
+     *   age                        péremption en minutes ('' = défaut du type)
+     */
+    public static function sanitizeFmt($_fmt) {
+        $raw = is_array($_fmt) ? $_fmt : array();
+        $text = function ($_key, $_max) use ($raw) {
+            return isset($raw[$_key]) ? self::trimText($raw[$_key], $_max) : '';
+        };
+        $fmt = array(
+            'invert' => (isset($raw['invert']) && (int) $raw['invert'] === 1) ? 1 : 0,
+            'l0'     => $text('l0', self::VALUE_MAX),
+            't0'     => self::sanitizeTone(isset($raw['t0']) ? $raw['t0'] : ''),
+            'l1'     => $text('l1', self::VALUE_MAX),
+            't1'     => self::sanitizeTone(isset($raw['t1']) ? $raw['t1'] : ''),
+            /* v3.1 : unité VIDE = celle de la commande — une seule règle, la
+             * même dans la page (placeholder) et ici. */
+            'unit'   => (isset($raw['unit']) && trim((string) $raw['unit']) !== '') ? $text('unit', 8) : null,
+            'dec'    => (isset($raw['dec']) && is_numeric($raw['dec'])) ? max(0, min(3, (int) $raw['dec'])) : '',
+            'base'   => self::sanitizeTone(isset($raw['base']) ? $raw['base'] : ''),
+            'age'    => (isset($raw['age']) && is_numeric($raw['age']) && (int) $raw['age'] >= 0) ? (int) $raw['age'] : '',
+        );
+        for ($i = 1; $i <= self::VIEW_THRESHOLDS; $i++) {
+            $value = isset($raw['th' . $i . 'v']) ? str_replace(',', '.', trim((string) $raw['th' . $i . 'v'])) : '';
+            $fmt['th' . $i . 'v'] = is_numeric($value) ? (string) (float) $value : '';
+            $fmt['th' . $i . 't'] = self::sanitizeTone(isset($raw['th' . $i . 't']) ? $raw['th' . $i . 't'] : '', 'warn');
+        }
+        for ($i = 1; $i <= self::VIEW_MAPS; $i++) {
+            $fmt['m' . $i . 'v'] = $text('m' . $i . 'v', 64);
+            $fmt['m' . $i . 'l'] = $text('m' . $i . 'l', self::VALUE_MAX);
+            $fmt['m' . $i . 't'] = self::sanitizeTone(isset($raw['m' . $i . 't']) ? $raw['m' . $i . 't'] : '');
+        }
+        return $fmt;
     }
 
     /*
@@ -624,6 +740,18 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
+     * Écran en LECTURE SEULE — contrat v3.0, « ui.readonly ». Défaut false.
+     * La carte de schéma 3 n'envoie alors aucun « press » ; le plugin, lui,
+     * REFUSE tout « press » de cet écran (403 read_only), quel que soit le
+     * schéma : la carte qui obéit est le confort, le plugin qui refuse est la
+     * garantie — un écran d'entrée ne doit pas ouvrir le portail, même avec
+     * un firmware défectueux ou une clé API dérobée.
+     */
+    public function readOnly() {
+        return ((int) $this->getConfiguration('readonly', 0)) === 1;
+    }
+
+    /*
      * Le décalage horaire local, en secondes, DST COMPRISE — contrat v2.0.
      *
      * Calculé à partir du fuseau de Jeedom, jamais codé en dur : un décalage
@@ -732,11 +860,7 @@ class glowscreen32 extends eqLogic {
         if ($reference === '') {
             return null;
         }
-        try {
-            $cmd = cmd::byString($reference);
-        } catch (Throwable $e) {
-            $cmd = null;
-        }
+        $cmd = self::cmdByString($reference);
         if (!is_object($cmd) || $cmd->getType() != 'info') {
             return null;
         }
@@ -761,13 +885,11 @@ class glowscreen32 extends eqLogic {
         if ($maxAge > 0) {
             $age = self::cmdAge($cmd);
             if ($age !== null && $age > $maxAge) {
-                log::add('glowscreen32', 'info', sprintf(
-                    __('%1$s : la valeur du bandeau « %2$s » date de %3$s, au-delà du seuil de %4$s minutes : le bandeau reste vide plutôt que d\'afficher une valeur périmée. Vérifiez que la collecte de cette commande tourne encore.', __FILE__),
-                    $this->getHumanName(), $cmd->getHumanName(),
-                    self::humanDuration($age), (int) ($maxAge / 60)));
+                $this->noteInfoStale(true, $cmd, $age, $maxAge);
                 return null;
             }
         }
+        $this->noteInfoStale(false, $cmd, 0, $maxAge);
 
         $value = $cmd->execCmd();
         if ($value === null || is_array($value) || trim((string) $value) === '') {
@@ -775,18 +897,16 @@ class glowscreen32 extends eqLogic {
         }
 
         if (is_numeric($value)) {
-            $number = round((float) $value, 1);
-            /* « 21 °C » et non « 21.0 °C » : le bandeau a seize caractères, et
-             * un zéro décimal qui ne dit rien en mange deux. */
-            $text = (abs($number - round($number)) < 0.05)
-                ? (string) (int) round($number)
-                : number_format($number, 1, '.', '');
+            /* « 21 °C » et non « 21,0 °C » : le bandeau a seize caractères, et
+             * un zéro décimal qui ne dit rien en mange deux. v3.0 (revue) :
+             * virgule décimale, « 21,4 °C », comme les tuiles « valeur ». */
+            $text = self::viewNumber($value, '');
             $unit = trim((string) $cmd->getUnite());
             if ($unit !== '') {
                 $text .= ' ' . $unit;
             }
         } else {
-            $text = trim(strip_tags((string) $value));
+            $text = trim(self::cleanText($value));
         }
 
         if (mb_strlen($text) > self::INFO_MAX) {
@@ -794,12 +914,78 @@ class glowscreen32 extends eqLogic {
              * à chaque ping, c'est-à-dire toutes les trente secondes et par
              * écran. Une ligne d'avertissement par ping rendrait le journal
              * illisible au moment précis où l'on en a besoin. */
-            log::add('glowscreen32', 'debug', sprintf(
-                __('%1$s : le bandeau « %2$s » dépasse %3$s caractères, il est coupé.', __FILE__),
-                $this->getHumanName(), $text, self::INFO_MAX));
+            $cut  = $text;
             $text = mb_substr($text, 0, self::INFO_MAX);
         }
+        /* Tronqué ET journalisé — aux transitions (v3.1). */
+        $who = $this->getHumanName();
+        $this->noteTransitions('infocut', isset($cut) ? array($cut) : array(), 'warning', function ($item) use ($who) {
+            return sprintf(__('%1$s : le bandeau « %2$s » dépasse %3$s caractères, il est coupé.', __FILE__),
+                $who, $item, self::INFO_MAX);
+        });
         return $text;
+    }
+
+    /*
+     * Journalise la PÉREMPTION DU BANDEAU, et seulement quand elle CHANGE.
+     *
+     * ⚠ Pourquoi ce détour plutôt qu'un log::add() direct dans infoText().
+     *
+     * infoText() est appelée à CHAQUE « ping » et à chaque « layout », c'est-à-
+     * dire toutes les trente secondes et par écran. Journaliser à chaque appel
+     * produisait, mesuré sur l'installation de référence, huit lignes
+     * rigoureusement identiques pour un seul enregistrement, puis deux lignes
+     * par minute et par écran indéfiniment — jusqu'à noyer le journal au moment
+     * précis où l'on vient y chercher autre chose.
+     *
+     * Les deux journaux voisins de ce même fichier avaient déjà tiré la leçon
+     * (troncature du bandeau, aplatissement en schéma 1 : tous deux en
+     * « debug », avec le commentaire qui l'explique). Celui-ci avait été
+     * oublié.
+     *
+     * Le passer en « debug » l'aurait fait taire, mais il DIT QUELQUE CHOSE
+     * D'UTILE : une commande qui n'est plus collectée est une vraie panne, et
+     * silencieuse. On garde donc le niveau « info » et on ne parle qu'aux
+     * TRANSITIONS — exactement ce que noteFirmware() fait pour la version de la
+     * carte, et pour la même raison.
+     *
+     * Le retour à la normale est journalisé aussi : sans lui, le journal
+     * laisserait croire que la panne dure encore.
+     *
+     * ⚠ CONTRAT v2.2 : l'état « périmé » vit dans le CACHE, plus dans la
+     * configuration. Jusqu'en v2.1 il était écrit par save(true), c'est-à-dire
+     * en réenregistrant l'eqLogic entier tel que chargé au début de la requête
+     * — et une requête « ping » retenue 25 s écrasait alors toute
+     * configuration enregistrée entre-temps. L'API n'enregistre plus JAMAIS
+     * l'eqLogic. L'ancienne clé de configuration n'est plus que lue, une fois,
+     * pour amorcer le cache après la mise à jour du plugin.
+     */
+    private function noteInfoStale($_stale, $_cmd, $_age, $_maxAge) {
+        $stale = (bool) $_stale;
+        $key   = 'glowscreen32::infostale::' . $this->getId();
+        $raw   = cache::byKey($key)->getValue(null);
+        $was   = ($raw === null || $raw === '')
+            ? (((int) $this->getConfiguration('info_stale', 0)) === 1)
+            : (((int) $raw) === 1);
+        if ($was === $stale && $raw !== null && $raw !== '') {
+            return false;
+        }
+        cache::set($key, $stale ? 1 : 0);
+        if ($was === $stale) {
+            return false;
+        }
+
+        if ($stale) {
+            log::add('glowscreen32', 'info', sprintf(
+                __('%1$s : la valeur du bandeau « %2$s » date de %3$s, au-delà du seuil de %4$s minutes : le bandeau reste vide plutôt que d\'afficher une valeur périmée. Vérifiez que la collecte de cette commande tourne encore.', __FILE__),
+                $this->getHumanName(), $_cmd->getHumanName(),
+                self::humanDuration($_age), (int) ($_maxAge / 60)));
+        } else {
+            log::add('glowscreen32', 'info', sprintf(
+                __('%1$s : la valeur du bandeau « %2$s » est de nouveau collectée, elle réapparaît à l\'écran.', __FILE__),
+                $this->getHumanName(), $_cmd->getHumanName()));
+        }
+        return true;
     }
 
     /* Un champ de désignation de commande, tel qu'il sort du formulaire. */
@@ -809,11 +995,62 @@ class glowscreen32 extends eqLogic {
 
     /* Un texte de formulaire, sans balise ni débordement. */
     public static function trimText($_text, $_max) {
-        $text = trim(strip_tags((string) $_text));
+        /* v3.1 : plus de strip_tags(), qui effaçait « <5 » ou « a<b » — ce qui
+         * part vers la carte est du JSON, pas du HTML ; l'échappement se fait
+         * à l'AFFICHAGE dans la page. On retire seulement les caractères de
+         * contrôle et l'UTF-8 invalide. */
+        $text = trim(self::cleanText($_text));
         /* mb_substr et non substr : couper « Cinéma » au milieu d'un caractère
          * accentué produit du JSON invalide, que json_encode rend alors par
          * « false » — c'est-à-dire une mise en page vide. */
         return (mb_strlen($text) > $_max) ? mb_substr($text, 0, $_max) : $text;
+    }
+
+    /* Un texte venu d'une saisie ou d'une commande, rendu sûr pour le JSON :
+     * UTF-8 réparé (mb_scrub), caractères de contrôle remplacés par une espace. */
+    public static function cleanText($_text) {
+        $text = (string) $_text;
+        if (function_exists('mb_scrub')) {
+            $text = mb_scrub($text, 'UTF-8');
+        }
+        return (string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $text);
+    }
+
+    /* Une valeur venue du réseau, rendue sûre pour une ligne de journal :
+     * sans caractère de contrôle (pas de fausse ligne injectée), bornée. */
+    public static function logSafe($_value, $_max = 64) {
+        $text = self::cleanText(is_scalar($_value) ? $_value : json_encode($_value));
+        return (mb_strlen($text) > $_max) ? mb_substr($text, 0, $_max) . '…' : $text;
+    }
+
+    /*
+     * Journalise un défaut AUX TRANSITIONS seulement (v3.1). $_items : la
+     * liste courante (clés stables) ; $_onNew($item) rend le message d'un
+     * élément NOUVEAU ; $_onClear le message quand la liste se vide. L'état
+     * connu vit dans le cache, jamais dans la configuration : l'API
+     * n'enregistre pas l'eqLogic.
+     */
+    public function noteTransitions($_kind, $_items, $_level, $_onNew, $_onClear = null) {
+        if ($this->getId() == '') {
+            return;
+        }
+        $key   = 'glowscreen32::issues::' . $_kind . '::' . $this->getId();
+        $known = cache::byKey($key)->getValue(null);
+        $known = is_array($known) ? $known : null;
+        $items = array_values($_items);
+        if ($known !== null && $known == $items) {
+            return;
+        }
+        foreach ($items as $item) {
+            if ($known !== null && in_array($item, $known, true)) {
+                continue;
+            }
+            log::add('glowscreen32', $_level, $_onNew($item));
+        }
+        if ($_onClear !== null && $known !== null && count($known) > 0 && count($items) == 0) {
+            log::add('glowscreen32', 'info', $_onClear);
+        }
+        cache::set($key, $items);
     }
 
     /* Une couleur hexadécimale, ou celle par défaut. La forme courte #abc est
@@ -845,11 +1082,7 @@ class glowscreen32 extends eqLogic {
         if ($value === '') {
             return null;
         }
-        try {
-            $cmd = cmd::byString($value);
-        } catch (Throwable $e) {
-            return null;
-        }
+        $cmd = self::cmdByString($value);
         return (is_object($cmd) && $cmd->getType() == 'action') ? $cmd : null;
     }
 
@@ -886,7 +1119,7 @@ class glowscreen32 extends eqLogic {
         /* Un bouton « nav » ne commande rien : toute recherche de commande le
          * concernant est une erreur de raisonnement, et rendre null ici la rend
          * inoffensive partout à la fois. */
-        if ($_button['mode'] === self::MODE_NAV) {
+        if ($_button['mode'] === self::MODE_NAV || $_button['mode'] === self::MODE_VIEW) {
             return null;
         }
         if ($_button['mode'] === self::MODE_TOGGLE) {
@@ -923,16 +1156,13 @@ class glowscreen32 extends eqLogic {
         /* Contrat v2.0 : l'état d'un bouton « nav » est TOUJOURS null. Le
          * garde-fou est ici et non chez l'appelant, pour qu'une commande
          * d'état restée dans la configuration après un changement de mode ne
-         * fasse pas allumer une pastille sous un bouton de navigation. */
-        if ($_button['mode'] === self::MODE_NAV) {
+         * fasse pas allumer une pastille sous un bouton de navigation. Une
+         * tuile « view » (v3.0) n'a pas d'état non plus : elle a une VALEUR. */
+        if ($_button['mode'] === self::MODE_NAV || $_button['mode'] === self::MODE_VIEW) {
             return null;
         }
         if (isset($_button['state']) && $_button['state'] !== '') {
-            try {
-                $state = cmd::byString($_button['state']);
-            } catch (Throwable $e) {
-                $state = null;
-            }
+            $state = self::cmdByString($_button['state']);
             if (is_object($state) && $state->getType() == 'info') {
                 return $state;
             }
@@ -950,7 +1180,7 @@ class glowscreen32 extends eqLogic {
         if ($stateId == '') {
             return null;
         }
-        $state = cmd::byId($stateId);
+        $state = self::cmdById($stateId);
         return (is_object($state) && $state->getType() == 'info') ? $state : null;
     }
 
@@ -963,6 +1193,10 @@ class glowscreen32 extends eqLogic {
      * deux. Le contrat prévoit null pour exactement ce cas.
      */
     public static function buttonState($_button) {
+        /* v3.0 : un bouton inerte (non résolu, rang conservé) n'a pas d'état. */
+        if (!empty($_button['_inert'])) {
+            return null;
+        }
         $state = self::buttonStateCmd($_button);
         if ($state === null || $state->getSubType() != 'binary') {
             return null;
@@ -985,6 +1219,9 @@ class glowscreen32 extends eqLogic {
             /* Choisir le mode « nav » EST l'intention : un bouton de
              * navigation sans page visée est un bouton qu'on a commencé à
              * remplir, et mérite donc la ligne de journal. */
+            return true;
+        }
+        if ($_button['mode'] === self::MODE_VIEW) {
             return true;
         }
         if ($_button['mode'] === self::MODE_TOGGLE) {
@@ -1011,11 +1248,232 @@ class glowscreen32 extends eqLogic {
                 && $_button['nav'] < self::MAX_PAGES
                 && $_button['nav'] !== $_button['page'];
         }
+        if ($_button['mode'] === self::MODE_VIEW) {
+            return self::viewCmd($_button) !== null;
+        }
         if ($_button['mode'] === self::MODE_TOGGLE) {
             return self::buttonStateCmd($_button) !== null
                 && self::buttonMainCmd($_button) !== null;
         }
         return self::buttonCmd($_button) !== null || self::buttonScenario($_button) !== null;
+    }
+
+    /* ==================================================== TUILE « VIEW » — v3.0 */
+
+    /* L'empreinte d'un bouton tel qu'il est servi : sa signature de
+     * configuration (celle qui fait bouger « version »). */
+    public static function buttonFingerprint($_button) {
+        return substr(md5(json_encode(self::buttonSignature($_button))), 0, 12);
+    }
+
+    private function servedKey($_schema) {
+        return 'glowscreen32::served::' . $this->getId() . '::' . self::normalizeSchema($_schema);
+    }
+
+    /* Retient, par écran ET par schéma, l'empreinte de chaque rang du layout
+     * qui vient d'être servi à la carte — appelé par l'API seule, jamais par
+     * un aperçu. press() s'y réfère. */
+    public function rememberServedLayout($_schema) {
+        $prints = array();
+        foreach ($this->buttonsFor($_schema) as $button) {
+            $prints[] = self::buttonFingerprint($button);
+        }
+        cache::set($this->servedKey($_schema), $prints);
+    }
+
+    /* La commande d'information montrée par une tuile « view », ou null. */
+    public static function viewCmd($_button) {
+        if ($_button['mode'] !== self::MODE_VIEW || $_button['view'] === '') {
+            return null;
+        }
+        $cmd = self::cmdByString($_button['view']);
+        return (is_object($cmd) && $cmd->getType() == 'info') ? $cmd : null;
+    }
+
+    /* La famille de mise en forme d'une commande : binary, numeric ou string. */
+    public static function viewKind($_cmd) {
+        $subType = $_cmd->getSubType();
+        return ($subType === 'binary' || $subType === 'numeric') ? $subType : 'string';
+    }
+
+    /* Le seuil de péremption effectif d'une tuile, en SECONDES (0 = jamais).
+     * Numérique : 60 min par défaut. Binaire et texte : jamais par défaut — une
+     * porte fermée depuis trois jours n'émet rien et dit vrai. */
+    public static function viewMaxAge($_fmt, $_kind) {
+        if ($_fmt['age'] === '') {
+            return ($_kind === 'numeric') ? self::VIEW_NUMERIC_MAX_AGE * 60 : 0;
+        }
+        return ((int) $_fmt['age']) * 60;
+    }
+
+    /* Un nombre lisible d'un coup d'oeil, virgule décimale. $_dec '' = au plus
+     * une décimale, et pas de « ,0 » inutile. */
+    public static function viewNumber($_value, $_dec) {
+        $number = (float) $_value;
+        if ($_dec === '') {
+            $number = round($number, 1);
+            return (abs($number - round($number)) < 0.05)
+                ? (string) (int) round($number)
+                : number_format($number, 1, ',', '');
+        }
+        return number_format(round($number, (int) $_dec), (int) $_dec, ',', '');
+    }
+
+    /*
+     * La valeur mise en forme et le sens d'une tuile « view » — contrat v3.0.
+     * Rend array('v' => texte|null, 't' => sens). $_why reçoit la raison d'un
+     * « v » nul (missing, disabled, timeout, stale, empty) — l'aperçu de la
+     * page de configuration l'affiche.
+     *
+     * ⚠ PÉREMPTION — pas la règle du bandeau. « null » si l'équipement de la
+     * commande est désactivé ou en ALERTE DE COMMUNICATION Jeedom (statut
+     * « timeout » : délai maximal entre deux communications dépassé), et, pour
+     * une valeur NUMÉRIQUE, si « collectDate » dépasse le seuil de la tuile.
+     * Binaire et texte n'ont pas de seuil par défaut.
+     */
+    public static function viewResult($_button, &$_why = null, &$_cut = null) {
+        $_why = '';
+        $_cut = null;
+        $null = array('v' => null, 't' => 'neutral');
+        $cmd  = self::viewCmd($_button);
+        if ($cmd === null) {
+            $_why = 'missing';
+            return $null;
+        }
+        $eqLogic = $cmd->getEqLogic();
+        if (!is_object($eqLogic) || $eqLogic->getIsEnable() != 1) {
+            $_why = 'disabled';
+            return $null;
+        }
+        if (((int) $eqLogic->getStatus('timeout', 0)) === 1) {
+            $_why = 'timeout';
+            return $null;
+        }
+        $fmt    = $_button['fmt'];
+        $kind   = self::viewKind($cmd);
+        $maxAge = self::viewMaxAge($fmt, $kind);
+        if ($maxAge > 0) {
+            $age = self::cmdAge($cmd);
+            if ($age !== null && $age > $maxAge) {
+                $_why = 'stale';
+                return $null;
+            }
+        }
+        $raw = $cmd->execCmd();
+        if ($raw === null || is_array($raw) || trim((string) $raw) === '') {
+            $_why = 'empty';
+            return $null;
+        }
+
+        $tone = 'neutral';
+        if ($kind === 'binary') {
+            $bit = (((int) $raw) === 1) ? 1 : 0;
+            if ($fmt['invert'] === 1) {
+                $bit = 1 - $bit;
+            }
+            $text = ($fmt['l' . $bit] !== '') ? $fmt['l' . $bit] : (string) $bit;
+            $tone = $fmt['t' . $bit];
+        } elseif ($kind === 'numeric' && is_numeric($raw)) {
+            $text = self::viewNumber($raw, $fmt['dec']);
+            $unit = ($fmt['unit'] === null) ? trim((string) $cmd->getUnite()) : $fmt['unit'];
+            if ($unit !== '') {
+                $text .= ' ' . $unit;
+            }
+            /* Seuils CROISSANTS : le sens est celui du plus haut seuil
+             * atteint, « base » en dessous du premier. */
+            $tone = $fmt['base'];
+            $steps = array();
+            for ($i = 1; $i <= self::VIEW_THRESHOLDS; $i++) {
+                if ($fmt['th' . $i . 'v'] !== '') {
+                    $steps[] = array((float) $fmt['th' . $i . 'v'], $fmt['th' . $i . 't']);
+                }
+            }
+            usort($steps, function ($a, $b) { return ($a[0] < $b[0]) ? -1 : (($a[0] > $b[0]) ? 1 : 0); });
+            foreach ($steps as $step) {
+                if ((float) $raw >= $step[0]) {
+                    $tone = $step[1];
+                }
+            }
+        } else {
+            $text = trim(self::cleanText($raw));
+            for ($i = 1; $i <= self::VIEW_MAPS; $i++) {
+                if ($fmt['m' . $i . 'v'] !== '' && strcasecmp($fmt['m' . $i . 'v'], $text) === 0) {
+                    $tone = $fmt['m' . $i . 't'];
+                    if ($fmt['m' . $i . 'l'] !== '') {
+                        $text = $fmt['m' . $i . 'l'];
+                    }
+                    break;
+                }
+            }
+        }
+        if (mb_strlen($text) > self::VALUE_MAX) {
+            /* Tronquée ET journalisée (par l'appelant, aux transitions). */
+            $_cut = $text;
+            $text = mb_substr($text, 0, self::VALUE_MAX);
+        }
+        return array('v' => $text, 't' => self::sanitizeTone($tone));
+    }
+
+    /*
+     * Le préremplissage d'une tuile d'après le TYPE GÉNÉRIQUE Jeedom de la
+     * commande — contrat v3.0. Rend array('fmt' => …, 'doubt' => bool).
+     *
+     * « doubt » marque un SENS DOUTEUX : rien, ni dans le coeur de Jeedom ni
+     * dans les types génériques, ne fixe ce que veut dire « 1 » pour une porte
+     * ou une serrure — chaque module fait à sa façon. Le préremplissage suit
+     * la convention la plus répandue (1 = fermé / verrouillé), et la page
+     * exige alors de vérifier sur l'APERÇU de la valeur réelle. La case
+     * « inverser » de l'affichage Jeedom de la commande (invertBinary), elle,
+     * est un fait : elle est reprise.
+     */
+    public static function viewDefaults($_cmd) {
+        $fmt   = self::sanitizeFmt(array());
+        $kind  = self::viewKind($_cmd);
+        $type  = strtoupper(trim((string) $_cmd->getGeneric_type()));
+        $doubt = false;
+        if ($kind === 'binary') {
+            $table = array(
+                'OPENING'            => array('Ouverte', 'warn', 'Fermée', 'ok', true),
+                'OPENING_WINDOW'     => array('Ouverte', 'warn', 'Fermée', 'ok', true),
+                'BARRIER_STATE'      => array('Ouvert', 'warn', 'Fermé', 'ok', true),
+                'GARAGE_STATE'       => array('Ouvert', 'warn', 'Fermé', 'ok', true),
+                'LOCK_STATE'         => array('Déverrouillée', 'warn', 'Verrouillée', 'ok', true),
+                'ALARM_ENABLE_STATE' => array('Désarmée', 'neutral', 'Armée', 'alert', false),
+                'ALARM_STATE'        => array('Calme', 'ok', 'Déclenchée', 'alert', false),
+                'SIREN_STATE'        => array('Silence', 'neutral', 'Sirène', 'alert', false),
+                'HEATING_STATE'      => array('Arrêt', 'neutral', 'Chauffe', 'ok', false),
+                'ENERGY_STATE'       => array('Éteint', 'neutral', 'Allumé', 'ok', false),
+                'LIGHT_STATE'        => array('Éteint', 'neutral', 'Allumé', 'ok', false),
+                'SMOKE'              => array('RAS', 'ok', 'Fumée', 'alert', false),
+                'FLOOD'              => array('RAS', 'ok', 'Fuite', 'alert', false),
+                'PRESENCE'           => array('Personne', 'neutral', 'Présence', 'ok', false),
+            );
+            if (isset($table[$type])) {
+                list($fmt['l0'], $fmt['t0'], $fmt['l1'], $fmt['t1'], $doubt) = $table[$type];
+            } else {
+                /* Type inconnu : on n'invente pas de sens. La valeur brute
+                 * s'affiche (0 ou 1) jusqu'à ce que l'utilisateur nomme les
+                 * deux états. */
+                $doubt = true;
+            }
+            $fmt['invert'] = ((int) $_cmd->getDisplay('invertBinary', 0) === 1) ? 1 : 0;
+        } elseif ($kind === 'numeric') {
+            $fmt['unit'] = trim((string) $_cmd->getUnite());
+            $numeric = array(
+                'TEMPERATURE' => array('°C', 1),
+                'WEATHER_TEMPERATURE' => array('°C', 1),
+                'HUMIDITY'    => array('%', 0),
+                'POWER'       => array('W', 0),
+                'CONSUMPTION' => array('kWh', 1),
+            );
+            if (isset($numeric[$type])) {
+                if ($fmt['unit'] === '') {
+                    $fmt['unit'] = $numeric[$type][0];
+                }
+                $fmt['dec'] = $numeric[$type][1];
+            }
+        }
+        return array('fmt' => $fmt, 'doubt' => $doubt, 'kind' => $kind, 'generic' => $type);
     }
 
     /* ========================================================== MISE EN PAGE */
@@ -1032,25 +1490,42 @@ class glowscreen32 extends eqLogic {
      * finiraient un jour par diverger, et le symptôme serait un appui sur la
      * lampe qui ouvrirait le portail.
      *
-     * Les boutons sans cible sont retirés : une case vide dans le formulaire
-     * est un bouton que l'utilisateur n'a pas voulu, l'écran ne doit pas
-     * dessiner un carré qui ne fait rien. Une cible supprimée depuis fait
-     * disparaître son bouton de la même façon, et le journal le dit — sinon
-     * l'utilisateur voit un écran qui perd un bouton sans explication.
+     * Les cases VIDES sont retirées : une case vide dans le formulaire n'est
+     * pas un bouton. En revanche, un bouton CONFIGURÉ dont la cible ne se
+     * résout plus (commande supprimée, recréée) GARDE SON RANG, inerte — le
+     * retirer décalerait tous les id suivants sans que « version » bouge, et
+     * un appui ferait jouer le bouton d'à côté (contrat v3.0, revue).
      */
     public function activeButtons() {
-        $capacity = $this->pageCapacity();
-        $byPage   = array();
+        /* v3.1 : mémoïsé par requête. Un ping le demandait trois fois (états,
+         * valeurs, rev), et chaque passage résolvait toutes les commandes. */
+        if ($this->_active !== null) {
+            return $this->_active;
+        }
+        $capacity   = $this->pageCapacity();
+        $byPage     = array();
+        $incomplete = array();
+        $overflow   = array();
 
         foreach ($this->buttons() as $index => $button) {
-            if (!self::buttonResolves($button)) {
-                if (self::buttonConfigured($button)) {
-                    log::add('glowscreen32', 'warning', sprintf(
-                        __('%1$s : le bouton %2$s est incomplet ou vise une cible introuvable, il n\'est pas envoyé à l\'écran.', __FILE__),
-                        $this->getHumanName(), $index + 1
-                    ));
-                }
+            if (!self::buttonConfigured($button)) {
+                /* Une case laissée vide : rien à servir. */
                 continue;
+            }
+            /*
+             * ⚠ v3.0 (revue) — UN BOUTON QUI NE SE RÉSOUT PLUS GARDE SON RANG.
+             *
+             * Jusqu'ici, un bouton dont la commande avait été supprimée ou
+             * recréée (réinclusion, équipement refait) était RETIRÉ de
+             * l'aplatissement : tous les id suivants reculaient d'un rang SANS
+             * que « version » bouge, et un appui fait avant le prochain layout
+             * déclenchait le bouton d'à côté. Il est désormais servi à sa place,
+             * INERTE (« _inert ») : state null, value null, et son press rend
+             * unknown_button. Le défaut est journalisé aux transitions.
+             */
+            $button['_inert'] = !self::buttonResolves($button);
+            if ($button['_inert']) {
+                $incomplete[] = $index;
             }
 
             $page = $button['page'];
@@ -1075,17 +1550,13 @@ class glowscreen32 extends eqLogic {
                     }
                 }
                 if ($free < 0) {
-                    /* Là, il n'y a plus de place du tout : c'est une
-                     * TRONCATURE, et le contrat v2.0 interdit de l'absorber en
-                     * silence. */
-                    log::add('glowscreen32', 'warning', sprintf(
-                        __('%1$s : la page %2$s est pleine (%3$s cases), le bouton %4$s n\'est pas envoyé à l\'écran.', __FILE__),
-                        $this->getHumanName(), $page + 1, $capacity, $index + 1));
+                    /* Plus de place du tout : TRONCATURE. Refusée à
+                     * l'enregistrement depuis la v3.1 (preSave) ; si une
+                     * configuration antérieure la contient encore, elle est
+                     * journalisée — aux transitions, pas à chaque ping. */
+                    $overflow[] = $index;
                     continue;
                 }
-                log::add('glowscreen32', 'debug', sprintf(
-                    __('%1$s : le bouton %2$s visait la case %3$s de la page %4$s, occupée ou hors grille ; il est placé en case %5$s.', __FILE__),
-                    $this->getHumanName(), $index + 1, $slot, $page + 1, $free));
                 $slot = $free;
             }
 
@@ -1097,12 +1568,6 @@ class glowscreen32 extends eqLogic {
          * L'aplatissement : page par page, case par case. C'est LUI qui définit
          * l'« id » global du contrat v2.0 — un rang continu 0 … N-1 sur tout
          * l'écran, et non un rang par page.
-         *
-         * Un rang par page recréerait l'ambiguïté que la v1.3 avait éliminée :
-         * le bouton 0 de la page 1 et celui de la page 0 porteraient le même
-         * id, et le plugin devrait se fier à un second champ envoyé par la
-         * carte pour les distinguer — c'est-à-dire redonner à la carte une
-         * parcelle d'autorité sur la résolution de la commande.
          */
         $active = array();
         for ($page = 0; $page < self::MAX_PAGES; $page++) {
@@ -1114,7 +1579,59 @@ class glowscreen32 extends eqLogic {
                 $active[] = $button;
             }
         }
+        $this->noteIncompleteButtons($incomplete);
+        $who = $this->getHumanName();
+        $this->noteTransitions('overflow', $overflow, 'warning', function ($index) use ($who) {
+            return sprintf(__('%1$s : le bouton %2$s ne tient plus dans sa page (grille pleine), il n\'est pas envoyé à l\'écran.', __FILE__),
+                $who, $index + 1);
+        }, sprintf(__('%s : plus aucun bouton hors grille.', __FILE__), $who));
+        $this->_active = $active;
         return $active;
+    }
+
+    /* Mémo des boutons aplatis (par requête), et des commandes résolues. */
+    private $_active = null;
+    private static $_cmdMemo = array();
+
+    /* Oublie ce qui a été mémoïsé : configuration enregistrée, ou recalcul
+     * d'un ping retenu (une commande a pu être recréée entre-temps). */
+    public function forgetMemo() {
+        $this->_active = null;
+        self::$_cmdMemo = array();
+    }
+
+    /* cmd::byString mémoïsé pour la requête. Lève comme lui. */
+    public static function cmdByString($_reference) {
+        $reference = trim((string) $_reference);
+        if (!array_key_exists($reference, self::$_cmdMemo)) {
+            try {
+                self::$_cmdMemo[$reference] = cmd::byString($reference);
+            } catch (Throwable $e) {
+                self::$_cmdMemo[$reference] = null;
+            }
+        }
+        return self::$_cmdMemo[$reference];
+    }
+
+    /* cmd::byId mémoïsé pour la requête. */
+    public static function cmdById($_id) {
+        $key = '#id:' . (int) $_id;
+        if (!array_key_exists($key, self::$_cmdMemo)) {
+            self::$_cmdMemo[$key] = cmd::byId($_id);
+        }
+        return self::$_cmdMemo[$key];
+    }
+
+    /*
+     * Journalise les boutons qui ne se résolvent plus — aux TRANSITIONS
+     * seulement : activeButtons() est appelée par chaque ping.
+     */
+    private function noteIncompleteButtons($_incomplete) {
+        $who = $this->getHumanName();
+        $this->noteTransitions('incomplete', $_incomplete, 'warning', function ($index) use ($who) {
+            return sprintf(__('%1$s : le bouton %2$s est incomplet ou vise une cible introuvable. Il garde sa place à l\'écran, inerte (pastille vide, appui refusé), jusqu\'à ce que sa configuration soit corrigée.', __FILE__),
+                $who, $index + 1);
+        }, sprintf(__('%s : plus aucun bouton incomplet.', __FILE__), $who));
     }
 
     /*
@@ -1144,7 +1661,9 @@ class glowscreen32 extends eqLogic {
         $legacy   = array();
         $dropped  = 0;
         foreach ($this->activeButtons() as $button) {
-            if ($button['mode'] === self::MODE_NAV) {
+            /* Ni « nav » (v2.0), ni « view » (v3.0) : une carte v1.4 ne
+             * connaît que « action » et « toggle ». */
+            if ($button['mode'] === self::MODE_NAV || $button['mode'] === self::MODE_VIEW) {
                 continue;
             }
             if (count($legacy) >= self::LEGACY_MAX_BUTTONS) {
@@ -1180,6 +1699,10 @@ class glowscreen32 extends eqLogic {
         if ($scenario !== null) {
             return self::trimText($scenario->getName(), self::LABEL_MAX);
         }
+        $view = self::viewCmd($_button);
+        if ($view !== null) {
+            return self::trimText($view->getName(), self::LABEL_MAX);
+        }
         /* Un bouton « nav » sans libellé prend le titre de la page qu'il
          * ouvre : c'est ce que l'utilisateur voulait écrire. */
         if ($_button['mode'] === self::MODE_NAV) {
@@ -1197,9 +1720,52 @@ class glowscreen32 extends eqLogic {
      * Seul le point d'entrée des cartes, qui lit l'en-tête, demande le schéma 2.
      */
     public function layout($_schema = self::SCHEMA_LEGACY) {
-        return (((int) $_schema) >= self::SCHEMA_CURRENT)
-            ? $this->layoutV2()
+        $schema = self::normalizeSchema($_schema);
+        return ($schema >= self::SCHEMA_V2)
+            ? $this->layoutV2($schema)
             : $this->layoutLegacy();
+    }
+
+    /* Un schéma ramené à 1, 2 ou 3 : on ne répond jamais au-dessus de ce
+     * qu'on sait servir, ni au-dessus de ce qui est annoncé. */
+    public static function normalizeSchema($_schema) {
+        $schema = (int) $_schema;
+        if ($schema >= self::SCHEMA_CURRENT) {
+            return self::SCHEMA_CURRENT;
+        }
+        return ($schema >= self::SCHEMA_V2) ? self::SCHEMA_V2 : self::SCHEMA_LEGACY;
+    }
+
+    /*
+     * L'APLATISSEMENT du schéma négocié — c'est lui qui définit les « id ».
+     *
+     *   schéma 1 : legacyButtons() — six au plus, ni « nav » ni « view » ;
+     *   schéma 2 : tous les boutons SAUF les tuiles « view » (v3.0), id
+     *              recalculés sur ce qui reste — une carte de schéma 2 prendrait
+     *              une tuile « view » pour un bouton et enverrait un « press » à
+     *              chaque toucher ;
+     *   schéma 3 : tout.
+     *
+     * ⚠ Les « id » d'un même bouton DIFFÈRENT d'un schéma à l'autre. « press »
+     * résout donc le rang reçu DANS CETTE LISTE-CI, pour le schéma de la
+     * requête, et jamais dans une autre — sinon, le bouton d'à côté.
+     */
+    public function buttonsFor($_schema) {
+        $schema = self::normalizeSchema($_schema);
+        if ($schema === self::SCHEMA_LEGACY) {
+            return $this->legacyButtons();
+        }
+        $buttons = $this->activeButtons();
+        if ($schema === self::SCHEMA_CURRENT) {
+            return $buttons;
+        }
+        $kept = array();
+        foreach ($buttons as $button) {
+            if ($button['mode'] !== self::MODE_VIEW) {
+                $kept[] = $button;
+            }
+        }
+        return $kept;
     }
 
     /*
@@ -1241,8 +1807,12 @@ class glowscreen32 extends eqLogic {
      * ni ne disparaît — c'est précisément ce que la v1.3 n'avait pas su faire
      * avec « id », et ce qui lui a coûté une rupture.
      */
-    public function layoutV2() {
-        $active = $this->activeButtons();
+    public function layoutV2($_schema = self::SCHEMA_CURRENT) {
+        $schema = self::normalizeSchema($_schema);
+        if ($schema < self::SCHEMA_V2) {
+            $schema = self::SCHEMA_V2;
+        }
+        $active = $this->buttonsFor($schema);
         $pages  = $this->pages();
 
         /* Les pages à envoyer : l'accueil toujours, celles qui portent au moins
@@ -1252,16 +1822,20 @@ class glowscreen32 extends eqLogic {
         $used = array(0 => true);
         foreach ($active as $button) {
             $used[$button['page']] = true;
-            if ($button['mode'] === self::MODE_NAV) {
+            if ($button['mode'] === self::MODE_NAV && empty($button['_inert'])) {
                 $used[$button['nav']] = true;
             }
         }
 
         $buttonsByPage = array();
         $states        = array();
+        $values        = array();
+        $cuts          = array();
         foreach ($active as $id => $button) {
             $state    = self::buttonState($button);
             $states[] = $state;
+            $view     = $this->viewFor($button, $cuts);
+            $values[] = $view;
 
             /*
              * L'icône n'est résolue QU'ICI : vocabulaire, alias, puis « none ».
@@ -1286,16 +1860,26 @@ class glowscreen32 extends eqLogic {
                 'label' => $this->buttonLabel($button),
                 'color' => $button['color'],
                 'icon'  => $icon,
-                'mode'  => $button['mode'],
+                /* Un « nav » inerte (page visée invalide) part comme un bouton
+                 * « action » inerte : sa place est gardée, son appui refusé. */
+                'mode'  => ($button['mode'] === self::MODE_NAV && !empty($button['_inert'])) ? self::MODE_ACTION : $button['mode'],
             );
-            if ($button['mode'] === self::MODE_NAV) {
+            if ($button['mode'] === self::MODE_NAV && empty($button['_inert'])) {
                 $entry['page'] = $button['nav'];
             }
             $entry['state'] = $state;
+            /* v3.0 : la valeur mise en forme et son sens, volatils (la carte
+             * ne les met pas en NVS). Schéma 3 seulement — buttonsFor() a déjà
+             * retiré les tuiles « view » pour une carte de schéma 2. */
+            if ($view !== null) {
+                $entry['value'] = $view['v'];
+                $entry['tone']  = $view['t'];
+            }
 
             $buttonsByPage[$button['page']][] = $entry;
         }
 
+        $this->noteValueCuts($cuts);
         $payload = array();
         for ($id = 0; $id < self::MAX_PAGES; $id++) {
             if (!isset($used[$id])) {
@@ -1313,21 +1897,33 @@ class glowscreen32 extends eqLogic {
             $payload[] = $page;
         }
 
-        $grid   = $this->grid();
-        $answer = array(
+        $grid    = $this->grid();
+        $version = $this->version();
+        $info    = $this->infoText();
+        $answer  = array(
             'ok'       => true,
-            'schema'   => self::SCHEMA_CURRENT,
+            'schema'   => $schema,
             'device'   => self::normalizeMac($this->getConfiguration('mac', '')),
             'name'     => $this->getName(),
-            'version'  => $this->version(),
+            'version'  => $version,
             'poll'     => $this->poll(),
             'grid'     => $grid,
-            'ui'       => array('swipe' => $this->swipe(), 'clock' => $this->clock()),
-            'info'     => $this->infoText(),
+            /* « readonly » en schéma 3 seulement : une carte de schéma 2 ne
+             * le lit pas — le plugin refuse ses « press » de toute façon. */
+            'ui'       => ($schema >= self::SCHEMA_CURRENT)
+                ? array('swipe' => $this->swipe(), 'clock' => $this->clock(), 'readonly' => $this->readOnly())
+                : array('swipe' => $this->swipe(), 'clock' => $this->clock()),
+            'info'     => $info,
             'time'     => time(),
             'tzoffset' => self::tzOffset(),
             'pages'    => $payload,
             'states'   => $states,
+            /* Contrat v2.2 : ajoutés EN FIN de réponse, et en schéma 2
+             * seulement. Une carte v2.0/v2.1 ne les cherche pas et ne les lit
+             * donc pas (ArduinoJson ne lit que les clés demandées). */
+            'features' => self::features(),
+            'rev'      => self::revOf($version, $states, $info, $this->commandHeadSeq(),
+                ($schema >= self::SCHEMA_CURRENT) ? $values : null),
         );
 
         /*
@@ -1361,14 +1957,62 @@ class glowscreen32 extends eqLogic {
      * couleurs, ni identifiants : seulement les états.
      */
     public function states($_schema = self::SCHEMA_LEGACY) {
-        $states  = array();
-        $buttons = (((int) $_schema) >= self::SCHEMA_CURRENT)
-            ? $this->activeButtons()
-            : $this->legacyButtons();
-        foreach ($buttons as $button) {
+        return $this->rows($_schema)[0];
+    }
+
+    /*
+     * « states » et « values » en UNE SEULE passe sur le même aplatissement —
+     * v3.1. Leurs longueurs sont donc égales par construction (la carte
+     * ignore « values » et force un layout sinon), et chaque commande n'est
+     * lue qu'une fois. « values » vaut null hors schéma 3.
+     */
+    public function rows($_schema) {
+        $schema = self::normalizeSchema($_schema);
+        $states = array();
+        $values = ($schema >= self::SCHEMA_CURRENT) ? array() : null;
+        $cuts   = array();
+        foreach ($this->buttonsFor($schema) as $button) {
             $states[] = self::buttonState($button);
+            if ($values !== null) {
+                $values[] = $this->viewFor($button, $cuts);
+            }
         }
-        return $states;
+        $this->noteValueCuts($cuts);
+        return array($states, $values);
+    }
+
+    /* La valeur d'une tuile « view » (ou null pour un autre mode), en notant
+     * une éventuelle troncature à 16 caractères dans $_cuts. */
+    public function viewFor($_button, &$_cuts) {
+        if ($_button['mode'] !== self::MODE_VIEW) {
+            return null;
+        }
+        $why = '';
+        $cut = null;
+        $result = self::viewResult($_button, $why, $cut);
+        if ($cut !== null) {
+            $_cuts[] = $_button['page'] . ':' . $_button['slot'] . ':' . $cut;
+        }
+        return $result;
+    }
+
+    /* « value » tronquée à 16 caractères : journalisé aux TRANSITIONS. */
+    private function noteValueCuts($_cuts) {
+        $who = $this->getHumanName();
+        $this->noteTransitions('valuecut', $_cuts, 'warning', function ($item) use ($who) {
+            $parts = explode(':', $item, 3);
+            return sprintf(__('%1$s : la valeur « %2$s » (page %3$s, case %4$s) dépasse %5$s caractères, elle est coupée à l\'écran. Raccourcissez son libellé.', __FILE__),
+                $who, $parts[2], ((int) $parts[0]) + 1, ((int) $parts[1]) + 1, self::VALUE_MAX);
+        });
+    }
+
+    /*
+     * « values » — contrat v3.0, schéma 3. Même longueur que « states »,
+     * indexé par l'id global : null pour toute tuile qui n'est pas « view »,
+     * {"v": …, "t": …} sinon.
+     */
+    public function values() {
+        return $this->rows(self::SCHEMA_CURRENT)[1];
     }
 
     /*
@@ -1383,8 +2027,11 @@ class glowscreen32 extends eqLogic {
      * firmware ignore « states » et force un layout complet : c'est cette règle
      * qui a rattrapé la v1.2, et elle est conservée telle quelle.
      */
-    public function ping($_schema = self::SCHEMA_LEGACY) {
-        if (((int) $_schema) < self::SCHEMA_CURRENT) {
+    public function ping($_schema = self::SCHEMA_LEGACY, $_deliver = false) {
+        $schema = self::normalizeSchema($_schema);
+        if ($schema < self::SCHEMA_V2) {
+            /* Schéma 1 : INCHANGÉ, octet pour octet. Ni « features », ni
+             * « rev », ni « cmd » — et aucune commande retirée de la file. */
             return array(
                 'ok'      => true,
                 'version' => $this->version(),
@@ -1392,14 +2039,592 @@ class glowscreen32 extends eqLogic {
                 'states'  => $this->states(self::SCHEMA_LEGACY),
             );
         }
-        return array(
+        $version = $this->version();
+        $info    = $this->infoText();
+        list($states, $values) = $this->rows($schema);
+        $answer  = array(
             'ok'       => true,
-            'version'  => $this->version(),
+            'version'  => $version,
             'time'     => time(),
             'tzoffset' => self::tzOffset(),
-            'info'     => $this->infoText(),
-            'states'   => $this->states(self::SCHEMA_CURRENT),
+            'info'     => $info,
+            'states'   => $states,
         );
+        if ($values !== null) {
+            $answer['values'] = $values;
+        }
+        /*
+         * Contrat v2.2 : au plus UNE commande à distance par réponse, retirée
+         * de la file au moment même où elle y est placée — livraison « au plus
+         * une fois ». Seul le point d'entrée des cartes demande la livraison ;
+         * un appel interne (aperçu, contrôle) ne doit rien consommer.
+         */
+        if ($_deliver) {
+            $cmd = $this->dequeueCommand();
+            if ($cmd !== null) {
+                $answer['cmd'] = $cmd;
+            }
+        }
+        $answer['features'] = self::features();
+        /* Calculée APRÈS le retrait : s'il reste des commandes, la tête de file
+         * a changé, « rev » aussi, et le ping suivant revient aussitôt. */
+        $answer['rev'] = self::revOf($version, $states, $info, $this->commandHeadSeq(), $values);
+        return $answer;
+    }
+
+    /* ============================================ ATTENTE LONGUE — v2.2 */
+
+    /*
+     * Durée maximale de retenue d'un « ping », en secondes — « features.wait ».
+     * La carte envoie min(features.wait, poll), si bien que l'intervalle entre
+     * deux requêtes reste sous poll, donc sous le plafond 2 × poll de la v2.1 :
+     * le seuil hors ligne 3 × 2 × poll ne change pas.
+     */
+    const LONGPOLL_MAX = 25;
+
+    /* Pas de la boucle de retenue : le compteur de réveil est relu au moins
+     * deux fois par seconde (contrat : « au plus toutes les 500 ms »). */
+    const LONGPOLL_TICK_US = 250000;
+
+    /* Recalcul forcé de « rev » pendant une retenue, en secondes — même sans
+     * réveil. C'est ce qui attrape la PÉREMPTION du bandeau (aucun événement ne
+     * la signale) et un événement que le listener aurait manqué. */
+    const LONGPOLL_RECHECK = 15;
+
+    /* Les capacités annoncées en schéma 2 — contrat v2.2. La carte n'utilise
+     * une capacité que si elle est annoncée. */
+    public static function features() {
+        return array('wait' => self::LONGPOLL_MAX, 'cmd' => true);
+    }
+
+    /*
+     * « rev » : un court hachage de tout ce que porte un ping SAUF « time » —
+     * les états, le bandeau, la version, et le seq de la commande en tête de
+     * file. Opaque pour la carte, ≤ 16 caractères (8 ici).
+     */
+    public static function revOf($_version, $_states, $_info, $_headSeq, $_values = null) {
+        $parts = array((int) $_version, array_values((array) $_states), $_info, $_headSeq);
+        /* v3.0 : « rev » couvre « values » en schéma 3. Absent en schéma 2, si
+         * bien que la rev d'une carte de schéma 2 est calculée exactement comme
+         * en v2.2. */
+        if ($_values !== null) {
+            $parts[] = array_values((array) $_values);
+        }
+        return substr(md5(json_encode($parts, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)), 0, 8);
+    }
+
+    /* La « rev » courante de cet écran, telle qu'un ping de CE schéma la
+     * rendrait. */
+    public function currentRev($_schema = self::SCHEMA_V2) {
+        $schema = self::normalizeSchema($_schema);
+        list($states, $values) = $this->rows($schema);
+        return self::revOf($this->version(), $states, $this->infoText(), $this->commandHeadSeq(), $values);
+    }
+
+    /*
+     * Les petits fichiers de l'attente longue, dans le dossier temporaire de
+     * Jeedom (/tmp/jeedom/glowscreen32/), et PAS dans cache:: : la boucle de
+     * retenue les relit quatre fois par seconde, et ce relevé doit rester
+     * SANS REQUÊTE SQL quel que soit le moteur de cache choisi dans Jeedom
+     * (MariadbCache en est un). Un fichier local se lit sans rien coûter.
+     *
+     *   wake-<id> — change à chaque événement qui peut faire bouger « rev »
+     *               (listener sur les états et le bandeau, version, file) ;
+     *   hold-<id> — la génération de la requête retenue en cours : une
+     *               nouvelle requête l'écrase, ce qui LIBÈRE la précédente.
+     */
+    public static function holdPath($_kind, $_id) {
+        static $dir = null;
+        if ($dir === null) {
+            $dir = jeedom::getTmpFolder('glowscreen32');
+        }
+        return $dir . '/' . $_kind . '-' . ((int) $_id);
+    }
+
+    public static function readToken($_kind, $_id) {
+        $value = @file_get_contents(self::holdPath($_kind, $_id));
+        return ($value === false) ? '' : $value;
+    }
+
+    /* Rend le jeton écrit, ou null si le fichier n'a pas pu l'être. */
+    private static function writeToken($_kind, $_id) {
+        $token = bin2hex(random_bytes(6)) . sprintf('%.6F', microtime(true));
+        $path  = self::holdPath($_kind, $_id);
+        if (@file_put_contents($path, $token, LOCK_EX) === false) {
+            return null;
+        }
+        @chmod($path, 0666);
+        return $token;
+    }
+
+    /* Le motif de sortie de la dernière retenue de CETTE requête, et son
+     * jeton : l'API ne livre pas de commande à une requête libérée, ni à une
+     * requête dont le jeton n'est plus le dernier (v3.1). */
+    private static $_holdWhy = '';
+    private static $_holdToken = null;
+
+    public static function lastHoldWhy() {
+        return self::$_holdWhy;
+    }
+
+    /* Vrai si une requête retenue PLUS RÉCENTE de cet écran a pris la main
+     * depuis : la nôtre n'est plus celle qui doit recevoir une commande. */
+    public static function holdSuperseded($_id) {
+        return self::$_holdToken !== null && self::readToken('hold', $_id) !== self::$_holdToken;
+    }
+
+    /* Réveille un éventuel ping retenu de cet écran. Ne coûte qu'une écriture
+     * de fichier : appelé depuis le listener, il s'exécute dans le processus
+     * qui a émis l'événement. */
+    public static function wakeScreen($_id) {
+        if ((int) $_id <= 0) {
+            return;
+        }
+        self::writeToken('wake', $_id);
+    }
+
+    /*
+     * Retient un ping jusqu'à ce que « rev » change ou que $_wait secondes
+     * s'écoulent — contrat v2.2. Rend l'eqLogic RELU depuis la base à la
+     * sortie (ou null s'il a disparu) : la réponse doit être calculée au
+     * moment où elle part, sur la configuration du moment.
+     *
+     * $_wake est le jeton de réveil lu AVANT que l'appelant ait calculé la
+     * rev courante : un événement survenu entre les deux est ainsi vu au
+     * premier tour de boucle au lieu d'être perdu.
+     *
+     * Aucune requête SQL pendant l'attente proprement dite : seuls les deux
+     * fichiers ci-dessus sont relus. L'eqLogic n'est rechargé que sur réveil,
+     * ou toutes les LONGPOLL_RECHECK secondes.
+     */
+    public static function holdPing($_eqLogic, $_rev, $_wait, $_wake, $_schema = self::SCHEMA_V2) {
+        $id   = (int) $_eqLogic->getId();
+        $wait = max(1, min(self::LONGPOLL_MAX, (int) $_wait));
+        @set_time_limit($wait + 15);
+        /* Aucune session ne doit rester ouverte pendant la retenue : elle
+         * bloquerait toute autre requête de la même session. L'API n'en ouvre
+         * pas ; le garde-fou coûte une ligne. */
+        if (function_exists('session_status') && session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        $mine      = self::writeToken('hold', $id);
+        self::$_holdToken = $mine;
+        if ($mine === null) {
+            /* v3.1 : jeton non inscriptible — on attend quand même, sans test
+             * de libération (pas d'échec « ouvert »), et on le dit une fois. */
+            $flag = 'glowscreen32::holdunwritable';
+            if (cache::byKey($flag)->getValue('') === '') {
+                cache::set($flag, 1, 86400);
+                log::add('glowscreen32', 'error', sprintf(
+                    __('Attente longue : %s n\'est pas inscriptible. Les requêtes retenues ne peuvent plus être libérées par la suivante ; vérifiez les droits du dossier temporaire de Jeedom.', __FILE__),
+                    self::holdPath('hold', $id)));
+            }
+        }
+        $wake      = (string) $_wake;
+        $start     = microtime(true);
+        $lastCheck = $start;
+        $eqLogic   = $_eqLogic;
+        $why       = 'timeout';
+
+        while (true) {
+            usleep(self::LONGPOLL_TICK_US);
+            $now = microtime(true);
+            if ($now - $start >= $wait) {
+                break;
+            }
+            if ($mine !== null && self::readToken('hold', $id) !== $mine) {
+                $why = 'released';
+                break;
+            }
+            $current = self::readToken('wake', $id);
+            if ($current !== $wake || ($now - $lastCheck) >= self::LONGPOLL_RECHECK) {
+                $wake      = $current;
+                $lastCheck = $now;
+                /* Mémo vidé : une commande a pu être recréée entre-temps. */
+                $_eqLogic->forgetMemo();
+                $fresh     = self::byId($id);
+                if (!is_object($fresh) || $fresh->getIsEnable() != 1) {
+                    $eqLogic = null;
+                    $why     = 'gone';
+                    break;
+                }
+                $eqLogic = $fresh;
+                if ($eqLogic->commandCount() > 0 || $eqLogic->currentRev($_schema) !== $_rev) {
+                    $why = 'changed';
+                    break;
+                }
+            }
+        }
+
+        self::$_holdWhy = $why;
+        if ($why === 'timeout' || $why === 'released') {
+            /* La réponse doit être calculée sur la configuration DU MOMENT :
+             * on relit l'écran avant de répondre. */
+            $_eqLogic->forgetMemo();
+            $fresh   = self::byId($id);
+            $eqLogic = (is_object($fresh) && $fresh->getIsEnable() == 1) ? $fresh : null;
+        }
+        log::add('glowscreen32', 'debug', sprintf('%s : ping retenu %.1f s (%s)',
+            is_object($eqLogic) ? $eqLogic->getHumanName() : ('#' . $id), microtime(true) - $start, $why));
+        return $eqLogic;
+    }
+
+    /* ============================================ COMMANDES À DISTANCE — v2.2 */
+
+    const CMD_QUEUE_MAX = 8;
+    const CMD_TTL       = 600;
+
+    /* Le vocabulaire fermé du contrat. « wifi » n'est PAS une commande Jeedom :
+     * elle ne part que depuis la page de l'équipement (ajax, administrateur). */
+    const REMOTE_VERBS = array('reboot', 'identify', 'message', 'page', 'calibrate', 'ota', 'wifi');
+
+    private function queueKey() {
+        return 'glowscreen32::queue::' . $this->getId();
+    }
+
+    /*
+     * Le mot de passe d'une commande « wifi » — v3.1 : JAMAIS dans le cache de
+     * Jeedom, que le coeur archive (cache.tar.gz) et sauvegarde. Il est rangé
+     * dans un fichier 0600 propre au plugin, sous data/secrets/ — dossier
+     * exclu des sauvegardes (backupExclude) et du déploiement — et effacé à la
+     * livraison comme à l'expiration.
+     */
+    public static function secretDir() {
+        $dir = __DIR__ . '/../../data/secrets';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+            @file_put_contents($dir . '/.htaccess', "Require all denied\n");
+        }
+        return $dir;
+    }
+
+    private static function secretPath($_id, $_seq) {
+        return self::secretDir() . '/wifi-' . ((int) $_id) . '-' . ((int) $_seq);
+    }
+
+    private static function writeSecret($_id, $_seq, $_value) {
+        $path = self::secretPath($_id, $_seq);
+        $old  = umask(0077);
+        $ok   = @file_put_contents($path, (string) $_value, LOCK_EX);
+        umask($old);
+        @chmod($path, 0600);
+        if ($ok === false) {
+            throw new Exception(__('Impossible d\'écrire le mot de passe en attente (data/secrets).', __FILE__));
+        }
+    }
+
+    private static function takeSecret($_id, $_seq) {
+        $path  = self::secretPath($_id, $_seq);
+        $value = @file_get_contents($path);
+        @unlink($path);
+        return ($value === false) ? null : $value;
+    }
+
+    /* Efface les mots de passe dont la commande a expiré (appelé par le
+     * cron et à chaque lecture de la file). */
+    public static function purgeSecrets() {
+        foreach ((array) @glob(self::secretDir() . '/wifi-*') as $file) {
+            if (is_file($file) && (time() - filemtime($file)) > self::CMD_TTL + 60) {
+                @unlink($file);
+            }
+        }
+    }
+
+    /* La file, débarrassée des commandes expirées. */
+    private function liveQueue() {
+        $queue = cache::byKey($this->queueKey())->getValue(array());
+        if (!is_array($queue)) {
+            return array();
+        }
+        $now  = time();
+        $live = array();
+        foreach ($queue as $entry) {
+            if (is_array($entry) && isset($entry['expires']) && $entry['expires'] > $now) {
+                $live[] = $entry;
+            } elseif (is_array($entry) && !empty($entry['secret'])) {
+                self::takeSecret($this->getId(), $entry['cmd']['seq']);
+            }
+        }
+        return $live;
+    }
+
+    public function commandCount() {
+        return count($this->liveQueue());
+    }
+
+    /* Le seq de la commande en tête de file, ou null — entre dans « rev ». */
+    public function commandHeadSeq() {
+        if ($this->getId() == '') {
+            return null;
+        }
+        $queue = $this->liveQueue();
+        return (count($queue) > 0) ? (int) $queue[0]['cmd']['seq'] : null;
+    }
+
+    /*
+     * Section critique sur la file de CET écran. La file est écrite par la page
+     * ou un scénario (mise en file) et par l'API (retrait) : sans verrou, deux
+     * écritures croisées perdraient une commande, ou en livreraient une deux
+     * fois.
+     */
+    private function withQueueLock($_callback) {
+        $handle = @fopen(self::holdPath('lock', $this->getId()), 'c');
+        if ($handle !== false) {
+            @flock($handle, LOCK_EX);
+        }
+        try {
+            return $_callback();
+        } finally {
+            if ($handle !== false) {
+                @flock($handle, LOCK_UN);
+                @fclose($handle);
+            }
+        }
+    }
+
+    /*
+     * Ramène les arguments d'un verbe dans les bornes du contrat, AVANT
+     * l'entrée en file. Rend la commande telle qu'elle partira (sans seq), ou
+     * lève une exception pour un verbe inconnu ou un argument sans lequel la
+     * commande n'a pas de sens.
+     */
+    public static function remoteCommand($_verb, $_args = array()) {
+        $verb = strtolower(trim((string) $_verb));
+        if (!in_array($verb, self::REMOTE_VERBS, true)) {
+            throw new Exception(sprintf(__('Commande à distance inconnue : %s', __FILE__), $verb));
+        }
+        $args  = is_array($_args) ? $_args : array();
+        $clamp = function ($_value, $_min, $_max, $_default) {
+            if (!isset($_value) || trim((string) $_value) === '' || !is_numeric($_value)) {
+                return $_default;
+            }
+            return max($_min, min($_max, (int) round((float) $_value)));
+        };
+        $cmd = array('do' => $verb);
+        switch ($verb) {
+            case 'identify':
+                $cmd['duration'] = $clamp(isset($args['duration']) ? $args['duration'] : null, 1, 120, 10);
+                break;
+            case 'message':
+                $text = trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', (string) (isset($args['text']) ? $args['text'] : '')));
+                if ($text === '') {
+                    throw new Exception(__('Le message à afficher est vide.', __FILE__));
+                }
+                $cmd['text']     = (mb_strlen($text) > 64) ? mb_substr($text, 0, 64) : $text;
+                $cmd['duration'] = $clamp(isset($args['duration']) ? $args['duration'] : null, 1, 600, 30);
+                break;
+            case 'page':
+                $cmd['page'] = $clamp(isset($args['page']) ? $args['page'] : null, 0, self::MAX_PAGES - 1, 0);
+                break;
+            case 'wifi':
+                $ssid = (string) (isset($args['ssid']) ? $args['ssid'] : '');
+                $pass = (string) (isset($args['pass']) ? $args['pass'] : '');
+                if (trim($ssid) === '') {
+                    throw new Exception(__('Le nom du réseau Wi-Fi est vide.', __FILE__));
+                }
+                /* En OCTETS, sans couper un caractère : 32 et 64 sont les
+                 * plafonds du Wi-Fi lui-même (SSID, clé WPA2). */
+                $cmd['ssid'] = (strlen($ssid) > 32) ? mb_strcut($ssid, 0, 32, 'UTF-8') : $ssid;
+                $cmd['pass'] = (strlen($pass) > 64) ? mb_strcut($pass, 0, 64, 'UTF-8') : $pass;
+                break;
+        }
+        return $cmd;
+    }
+
+    /*
+     * Met une commande en file pour cet écran — contrat v2.2.
+     *
+     * 8 au plus (la plus ancienne est abandonnée, et journalisée), durée de
+     * vie 10 minutes, « seq » croissant PAR ÉCRAN et PERSISTANT : il est rangé
+     * dans la configuration du plugin (config::save, table config), jamais dans
+     * l'eqLogic, et survit donc au vidage du cache comme à un redémarrage de
+     * Jeedom. Une carte ignore une commande dont le seq est celui de la
+     * dernière exécutée : un seq qui repartirait à 1 ferait ignorer la
+     * première commande suivante.
+     */
+    public function enqueueCommand($_verb, $_args = array()) {
+        if ($this->getId() == '') {
+            throw new Exception(__('Écran non enregistré.', __FILE__));
+        }
+        $cmd = self::remoteCommand($_verb, $_args);
+        $who = $this->getHumanName();
+        $entry = $this->withQueueLock(function () use ($cmd, $who) {
+            $seqKey = 'cmdseq::' . $this->getId();
+            $seq    = ((int) config::byKey($seqKey, 'glowscreen32', 0)) + 1;
+            config::save($seqKey, $seq, 'glowscreen32');
+
+            $queue = $this->liveQueue();
+            while (count($queue) >= glowscreen32::CMD_QUEUE_MAX) {
+                $dropped = array_shift($queue);
+                if (!empty($dropped['secret'])) {
+                    self::takeSecret($this->getId(), $dropped['cmd']['seq']);
+                }
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('%1$s : file des commandes à distance pleine (%2$s) — la plus ancienne, « %3$s » (seq %4$s), est abandonnée.', __FILE__),
+                    $who, glowscreen32::CMD_QUEUE_MAX, $dropped['cmd']['do'], $dropped['cmd']['seq']));
+            }
+            $entry = array(
+                'cmd'     => array_merge(array('seq' => $seq), $cmd),
+                'expires' => time() + glowscreen32::CMD_TTL,
+            );
+            if ($cmd['do'] === 'wifi') {
+                /* Le mot de passe quitte la file : fichier 0600. */
+                self::writeSecret($this->getId(), $seq, $cmd['pass']);
+                $entry['cmd']['pass'] = null;
+                $entry['secret'] = true;
+            }
+            $queue[] = $entry;
+            cache::set($this->queueKey(), $queue, glowscreen32::CMD_TTL + 60);
+            return $entry;
+        });
+        /* « rev » change avec la tête de file : un ping retenu la livre dans
+         * la seconde. */
+        self::wakeScreen($this->getId());
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : commande à distance « %2$s » mise en file (seq %3$s).', __FILE__),
+            $who, $cmd['do'], $entry['cmd']['seq']));
+        return $entry['cmd'];
+    }
+
+    /*
+     * Retire et rend la commande en tête de file, ou null. « Au plus une
+     * fois » : elle est retirée AVANT de partir. Une réponse perdue en route
+     * perd la commande ; un « reboot » rejoué faute d'acquittement serait une
+     * boucle de redémarrages.
+     */
+    public function dequeueCommand() {
+        if ($this->getId() == '') {
+            return null;
+        }
+        $key = $this->queueKey();
+        $raw = cache::byKey($key)->getValue(array());
+        if (!is_array($raw) || count($raw) == 0) {
+            return null;
+        }
+        $entry = $this->withQueueLock(function () use ($key) {
+            $queue = $this->liveQueue();
+            if (count($queue) == 0) {
+                cache::delete($key);
+                return null;
+            }
+            $entry = array_shift($queue);
+            if (count($queue) == 0) {
+                cache::delete($key);
+            } else {
+                cache::set($key, $queue, glowscreen32::CMD_TTL + 60);
+            }
+            return $entry;
+        });
+        if ($entry === null) {
+            return null;
+        }
+        if (!empty($entry['secret'])) {
+            $secret = self::takeSecret($this->getId(), $entry['cmd']['seq']);
+            if ($secret === null) {
+                log::add('glowscreen32', 'warning', sprintf(
+                    __('%1$s : mot de passe Wi-Fi de la commande seq %2$s introuvable — la commande n\'est pas livrée.', __FILE__),
+                    $this->getHumanName(), $entry['cmd']['seq']));
+                return null;
+            }
+            $entry['cmd']['pass'] = $secret;
+        }
+        log::add('glowscreen32', 'info', sprintf(
+            __('%1$s : commande à distance « %2$s » (seq %3$s) livrée à la carte.', __FILE__),
+            $this->getHumanName(), $entry['cmd']['do'], $entry['cmd']['seq']));
+        return $entry['cmd'];
+    }
+
+    /* ================================================== LISTENER — v2.2 */
+
+    /*
+     * Le listener de cet écran : les commandes d'état de ses boutons, et la
+     * commande de son bandeau. Chaque événement sur l'une d'elles réveille un
+     * ping retenu (pullChange). « background » à false : l'appel est
+     * synchrone dans le processus qui émet l'événement — il ne coûte qu'une
+     * écriture de fichier, là où un processus PHP lancé à chaque changement
+     * d'état serait autrement plus cher.
+     */
+    public function updateListener() {
+        if ($this->getId() == '') {
+            return;
+        }
+        $events = array();
+        if ($this->getIsEnable() == 1) {
+            foreach ($this->buttons() as $button) {
+                $state = self::buttonStateCmd($button);
+                if ($state !== null) {
+                    $events[$state->getId()] = true;
+                }
+                /* v3.0 : la commande d'une tuile « view » — « rev » couvre
+                 * « values », une porte qui s'ouvre libère le ping retenu. */
+                $view = self::viewCmd($button);
+                if ($view !== null) {
+                    $events[$view->getId()] = true;
+                }
+            }
+            $reference = trim((string) $this->getConfiguration('info_cmd', ''));
+            if ($reference !== '') {
+                try {
+                    $info = cmd::byString($reference);
+                } catch (Throwable $e) {
+                    $info = null;
+                }
+                if (is_object($info) && $info->getType() == 'info') {
+                    $events[$info->getId()] = true;
+                }
+            }
+        }
+
+        $listener = null;
+        foreach (listener::byClass('glowscreen32') as $candidate) {
+            if ($candidate->getFunction() != 'pullChange'
+                || (int) $candidate->getOption('eqLogic_id', 0) !== (int) $this->getId()) {
+                continue;
+            }
+            if ($listener === null) {
+                $listener = $candidate;
+            } else {
+                $candidate->remove();
+            }
+        }
+
+        if (count($events) == 0) {
+            if ($listener !== null) {
+                $listener->remove();
+            }
+            return;
+        }
+        if ($listener === null) {
+            $listener = new listener();
+            $listener->setClass('glowscreen32');
+            $listener->setFunction('pullChange');
+            $listener->setOption(array('eqLogic_id' => (int) $this->getId(), 'background' => false));
+        }
+        $listener->emptyEvent();
+        foreach (array_keys($events) as $cmdId) {
+            $listener->addEvent($cmdId);
+        }
+        $listener->save();
+    }
+
+    public function removeListener() {
+        foreach (listener::byClass('glowscreen32') as $candidate) {
+            if ((int) $candidate->getOption('eqLogic_id', 0) === (int) $this->getId()) {
+                $candidate->remove();
+            }
+        }
+    }
+
+    /* Appelé par le coeur à chaque changement d'une commande écoutée. */
+    public static function pullChange($_options) {
+        try {
+            if (is_array($_options) && isset($_options['eqLogic_id'])) {
+                self::wakeScreen($_options['eqLogic_id']);
+            }
+        } catch (Throwable $e) {
+            log::add('glowscreen32', 'debug', 'pullChange : ' . $e->getMessage());
+        }
     }
 
     /* ================================================================ APPUI */
@@ -1446,13 +2671,36 @@ class glowscreen32 extends eqLogic {
          * premiers boutons répondre juste et les autres rendre unknown_button,
          * plutôt que de déclencher silencieusement la mauvaise commande.
          */
-        $legacy  = (((int) $_schema) < self::SCHEMA_CURRENT);
-        $buttons = $legacy ? $this->legacyButtons() : $this->activeButtons();
+        $buttons = $this->buttonsFor($_schema);
 
         if ($rank < 0 || !isset($buttons[$rank])) {
             return null;
         }
         $button = $buttons[$rank];
+
+        /* v3.0 (revue) : un bouton non résolu garde son rang mais ne joue
+         * RIEN — unknown_button, journalisé. */
+        if (!empty($button['_inert'])) {
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : appui reçu sur le bouton %2$s, dont la commande ne se résout plus. Rien n\'est joué.', __FILE__),
+                $this->getHumanName(), $rank));
+            return null;
+        }
+
+        /*
+         * v3.1 — GARDE-FOU : le bouton à ce rang est-il bien celui que la carte
+         * a dessiné ? On compare sa signature à celle du dernier layout SERVI à
+         * cet écran dans CE schéma. Si la configuration a changé depuis (la
+         * carte n'a pas encore rechargé sa mise en page), l'appui est refusé
+         * plutôt que de jouer un autre bouton que celui qu'on a touché.
+         */
+        $served = cache::byKey($this->servedKey($_schema))->getValue(null);
+        if (is_array($served) && (!isset($served[$rank]) || $served[$rank] !== self::buttonFingerprint($button))) {
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : appui reçu sur le rang %2$s, mais ce bouton a changé depuis la dernière mise en page servie à la carte (schéma %3$s). Rien n\'est joué : la carte doit recharger sa mise en page.', __FILE__),
+                $this->getHumanName(), $rank, self::normalizeSchema($_schema)));
+            return null;
+        }
 
         /*
          * Un « press » sur un bouton « nav » : la navigation est locale à la
@@ -1461,6 +2709,14 @@ class glowscreen32 extends eqLogic {
          * unknown_button et une ligne de journal. Le cas ne peut pas se
          * produire en schéma 1, où les « nav » sont exclus de l'aplatissement.
          */
+        if ($button['mode'] === self::MODE_VIEW) {
+            /* v3.0 : une tuile « view » ne déclenche RIEN. Un press sur son id
+             * signale un firmware en désaccord avec la mise en page. */
+            log::add('glowscreen32', 'warning', sprintf(
+                __('%1$s : appui reçu sur la tuile %2$s, qui est une tuile « valeur » — elle ne commande rien. Rien n\'est joué.', __FILE__),
+                $this->getHumanName(), $rank));
+            return null;
+        }
         if ($button['mode'] === self::MODE_NAV) {
             log::add('glowscreen32', 'warning', sprintf(
                 __('%1$s : appui reçu sur le bouton %2$s, qui est un bouton de navigation — la carte exécute une mise en page différente de celle qui est configurée. Rien n\'est joué.', __FILE__),
@@ -1636,10 +2892,12 @@ class glowscreen32 extends eqLogic {
      * restauration ferait interroger Jeedom dix fois par seconde. */
     public function poll() {
         $poll = (int) $this->getConfiguration('poll', self::DEFAULT_POLL);
-        if ($poll < self::MIN_POLL) {
+        /* Contrat : hors bornes → 30, PAS la borne (v3.0, revue — un 4000
+         * rendait 3600). */
+        if ($poll < self::MIN_POLL || $poll > self::MAX_POLL) {
             return self::DEFAULT_POLL;
         }
-        return ($poll > self::MAX_POLL) ? self::MAX_POLL : $poll;
+        return $poll;
     }
 
     /*
@@ -1696,7 +2954,11 @@ class glowscreen32 extends eqLogic {
             /* Le SEUIL, pas l'âge : le seuil est de la configuration, l'âge est
              * de l'état. Le premier doit faire redessiner, le second jamais. */
             'infoage' => $this->infoMaxAge(),
-        )));
+        ) + ($this->readOnly()
+            /* v3.0 — ajoutée SEULEMENT quand elle est vraie : la signature
+             * d'un écran existant ne bouge pas, et le parc ne se redessine pas
+             * à la mise à jour du plugin. */
+            ? array('readonly' => 1) : array())));
     }
 
     public static function buttonSignature($_button) {
@@ -1712,6 +2974,10 @@ class glowscreen32 extends eqLogic {
         );
         if ($_button['mode'] === self::MODE_NAV) {
             $signature[] = $_button['nav'];
+        } elseif ($_button['mode'] === self::MODE_VIEW) {
+            /* v3.0 : la commande montrée et sa mise en forme. */
+            $signature[] = $_button['view'];
+            $signature[] = $_button['fmt'];
         } elseif ($_button['mode'] === self::MODE_TOGGLE) {
             $signature[] = $_button['on'];
             $signature[] = $_button['off'];
@@ -1727,21 +2993,28 @@ class glowscreen32 extends eqLogic {
     /*
      * L'horodatage du dernier appel reçu de la carte, ou une chaîne vide.
      *
-     * Il vit dans la CONFIGURATION de l'équipement, et non dans la seule
-     * commande d'information : c'est là que le reste du plugin — la page, le
-     * tableau du parc, un futur contrôle de présence — va le chercher, et c'est
-     * ce que « getConfiguration('lastcontact') » doit rendre.
+     * ⚠ CONTRAT v2.2 : la source est la COMMANDE D'INFORMATION « Dernier
+     * contact », et non plus la configuration. L'API n'enregistre plus jamais
+     * l'eqLogic : écrire la date dans la configuration supposait un save() à
+     * chaque contact, qui écrasait toute modification enregistrée par
+     * l'utilisateur pendant la requête — systématiquement, avec un ping retenu
+     * 25 s.
      *
-     * Le repli sur la commande couvre les écrans horodatés par les versions
-     * précédentes, qui ne l'écrivaient que là.
+     * La clé de configuration n'est plus écrite, mais reste lue : c'est là
+     * qu'une v2.1 rangeait la date. La plus RÉCENTE des deux fait foi, si bien
+     * qu'un écran silencieux depuis la mise à jour garde sa vraie date.
      */
     public function lastContact() {
-        $stamp = trim((string) $this->getConfiguration('lastcontact', ''));
-        if ($stamp !== '') {
-            return $stamp;
+        $cmd     = $this->getCmd('info', 'lastcontact');
+        $fromCmd = is_object($cmd) ? trim((string) $cmd->execCmd()) : '';
+        $legacy  = trim((string) $this->getConfiguration('lastcontact', ''));
+        if ($fromCmd === '') {
+            return $legacy;
         }
-        $cmd = $this->getCmd(null, 'lastcontact');
-        return is_object($cmd) ? trim((string) $cmd->execCmd()) : '';
+        if ($legacy === '') {
+            return $fromCmd;
+        }
+        return (strtotime($legacy) > strtotime($fromCmd)) ? $legacy : $fromCmd;
     }
 
     /* L'âge du dernier contact en secondes, ou null si l'écran n'a jamais
@@ -1762,13 +3035,28 @@ class glowscreen32 extends eqLogic {
      * retard ne doivent pas faire clignoter « hors ligne » sur une installation
      * parfaitement saine. La granularité d'horodatage est comptée en plus, sans
      * quoi un écran qui répond parfaitement paraîtrait en retard d'une minute.
+     *
+     * ⚠ L'intervalle compté est le MAXIMUM que le contrat autorise, soit
+     * IDLE_POLL_FACTOR x poll, et non « poll » — contrat v2.1.
+     *
+     * Depuis la v2.1 la carte espace ses pings quand son écran est atténué.
+     * Compter sur « poll » seul ferait passer TOUT LE PARC « hors ligne »
+     * chaque nuit, alors que chaque carte fonctionne parfaitement : une alerte
+     * qui se déclenche toutes les nuits sans raison est une alerte à laquelle
+     * on cesse de croire, et elle se tairait le jour où un écran meurt pour de
+     * bon.
+     *
+     * Le prix est assumé : au réglage par défaut (poll = 30 s), un écran
+     * réellement mort est signalé au bout de 3 x 2 x 30 + 60 = 4 minutes au
+     * lieu de 2 min 30. Sur un panneau mural, la différence ne coûte rien ; la
+     * fausse alerte nocturne, si.
      */
     public function isOnline() {
         $age = $this->contactAge();
         if ($age === null) {
             return false;
         }
-        return $age <= (3 * $this->poll()) + self::CONTACT_GRANULARITY;
+        return $age <= (3 * self::IDLE_POLL_FACTOR * $this->poll()) + self::CONTACT_GRANULARITY;
     }
 
     /* Le dernier contact tel qu'on le lit : la date, et depuis combien de
@@ -1799,45 +3087,290 @@ class glowscreen32 extends eqLogic {
     /*
      * Horodate le dernier échange avec la carte, et retient ce qu'elle a fait.
      *
-     * Écrit à DEUX endroits, et c'est voulu :
+     * ⚠ CONTRAT v2.2 — « le serveur n'enregistre JAMAIS l'eqLogic depuis
+     * l'API ». Jusqu'en v2.1 la date allait aussi dans la configuration, par
+     * save(true) : l'eqLogic entier, tel que chargé AU DÉBUT de la requête,
+     * était réécrit. Une configuration enregistrée par l'utilisateur pendant
+     * ce temps était écrasée sans un mot — fenêtre étroite avec une requête
+     * courte, systématique avec un ping retenu 25 s. Seules des commandes
+     * d'information sont désormais écrites ; elles vivent dans leur propre
+     * table et dans le cache, et ne touchent pas à la configuration.
      *
-     *  - la configuration de l'équipement, qui est la source consultée par le
-     *    plugin lui-même. La v1.0 ne l'écrivait pas, et c'est la raison pour
-     *    laquelle « getConfiguration('lastcontact') » rendait une chaîne vide
-     *    sur un écran qui dialoguait pourtant parfaitement : l'horodatage
-     *    n'existait que dans une commande d'information ;
-     *  - la commande d'information « Dernier contact », pour que l'écran soit
-     *    un équipement ordinaire sur le dashboard et qu'un scénario puisse
-     *    réagir à sa disparition.
-     *
-     * À la MINUTE, et non à chaque appel. Une carte « ping » toutes les 30 s ;
-     * avec dix écrans, horodater chaque appel ferait six cents écritures par
-     * heure pour une information dont personne ne lit la seconde. Un appui,
-     * lui, est rare et intéressant : il est toujours écrit.
-     *
-     * save(true) et non save() : l'écriture est DIRECTE, sans preSave() ni
-     * postSave(). Un ping ne doit ni recalculer la signature de mise en page, ni
-     * risquer de faire bouger le compteur de version, ni recréer les commandes,
-     * ni écrire une ligne de journal — il ne doit poser qu'une date.
+     * À la MINUTE, et non à chaque appel : chaque nouvelle date est un
+     * événement Jeedom. Un appui, lui, est rare et intéressant : il est
+     * toujours noté.
      */
+    /*
+     * Ce que l'API a déjà noté pour cet écran — v3.1 : un petit état en cache,
+     * lu UNE fois par requête. Il évite de recharger les commandes
+     * d'information (une requête SQL chacune) pour constater qu'il n'y a rien
+     * de neuf à écrire — le cas de presque tous les pings.
+     */
+    private $_seen = null;
+
+    private function seen() {
+        if ($this->_seen === null) {
+            $value = cache::byKey('glowscreen32::seen::' . $this->getId())->getValue(array());
+            $this->_seen = is_array($value) ? $value : array();
+        }
+        return $this->_seen;
+    }
+
+    private function seenSet($_values) {
+        $this->_seen = array_merge($this->seen(), $_values);
+        cache::set('glowscreen32::seen::' . $this->getId(), $this->_seen);
+    }
+
+    /* Une diagnostic « lent » (up, heap, blk) n'est noté qu'au plus toutes les
+     * cinq minutes, ou sur variation significative : chaque écriture est un
+     * événement Jeedom et, pour heap/blk, un point d'historique. */
+    const DIAG_INTERVAL = 300;
+
     public function noteContact($_press = null) {
         $now   = time();
         $stamp = date('Y-m-d H:i:s', $now);
+        $seen  = $this->seen();
+        if ($_press === null && isset($seen['contact']) && ($now - (int) $seen['contact']) < self::CONTACT_GRANULARITY) {
+            /* Noté il y a moins d'une minute : rien à écrire, et le cron ne
+             * pose 0 qu'après plusieurs minutes de silence. Aucune requête. */
+            return false;
+        }
         $age   = $this->contactAge();
 
         if ($_press === null && $age !== null && $age < self::CONTACT_GRANULARITY) {
+            /* Pas de nouvelle date, mais la présence est confirmée : le cron a
+             * pu poser 0 entre-temps (contact noté à l'ARRIVÉE d'une requête
+             * retenue, contrat v2.2). */
+            $this->noteOnline(true);
             return false;
         }
-
-        $this->setConfiguration('lastcontact', $stamp);
-        $this->save(true);
 
         $this->checkAndUpdateCmd('lastcontact', $stamp);
         $this->checkAndUpdateCmd('version', $this->version());
         if ($_press !== null) {
             $this->checkAndUpdateCmd('lastpress', $_press);
         }
+        /* Une carte qui parle est en ligne, par définition. Le retour à zéro,
+         * lui, ne peut venir que du cron : personne n'est là pour le dire. */
+        $this->noteOnline(true);
+        $this->seenSet(array('contact' => $now));
         return true;
+    }
+
+    /*
+     * ======================================================= PRÉSENCE
+     *
+     * « L'écran du couloir ne répond plus » est la première question qu'on se
+     * pose sur un parc, et jusqu'ici elle n'avait de réponse QUE dans le
+     * tableau de la page du plugin : isOnline() alimentait un pictogramme, et
+     * rien d'autre. Aucun scénario, aucune notification, aucun widget de
+     * dashboard ne pouvait réagir à un panneau mural devenu noir.
+     *
+     * D'où une commande d'information binaire ordinaire. La présence devient
+     * alors un fait Jeedom comme un autre : historisable, affichable, et
+     * utilisable dans un déclencheur.
+     *
+     * Écrit à deux endroits, et il en faut deux :
+     *   - noteContact() la met à 1 — une carte qui parle est en ligne ;
+     *   - cron() la remet à 0 — un silence ne se signale pas tout seul.
+     */
+    public function noteOnline($_online) {
+        $online = $_online ? 1 : 0;
+
+        $cmd = $this->getCmd(null, 'online');
+        if (!is_object($cmd)) {
+            /* Équipement créé avant la v2.1 et jamais réenregistré depuis. La
+             * mise à jour du plugin les rattrape (glowscreen32_update), mais on
+             * ne casse pas un ping pour autant. */
+            return false;
+        }
+
+        /* L'état connu vient de la commande elle-même : pas de champ de
+         * configuration à tenir en parallèle, donc rien qui puisse diverger. */
+        $before = $cmd->execCmd();
+        $known  = ($before === null || $before === '') ? null : ((((int) $before) === 1) ? 1 : 0);
+
+        $this->checkAndUpdateCmd('online', $online);
+
+        if ($known === $online) {
+            return false;
+        }
+
+        $age = $this->contactAge();
+        if ($online === 0 && $age === null) {
+            /* Un écran déclaré dans Jeedom mais qui n'a JAMAIS appelé est en
+             * cours d'enrôlement, pas en panne. La valeur est posée — il n'est
+             * effectivement pas en ligne — mais sans la ligne alarmante : la
+             * carte affiche sa MAC et attend qu'on la déclare, c'est le
+             * fonctionnement prévu. */
+            return true;
+        }
+
+        /* Aux TRANSITIONS seulement — même règle que partout ailleurs ici : un
+         * cron qui écrirait une ligne par minute et par écran rendrait le
+         * journal inutilisable. */
+        log::add('glowscreen32', ($online === 1) ? 'info' : 'warning', sprintf(
+            ($online === 1)
+                ? __('%1$s : l\'écran répond de nouveau.', __FILE__)
+                : __('%1$s : plus aucun appel depuis %2$s — l\'écran est déclaré hors ligne. Vérifiez son alimentation et sa liaison Wi-Fi.', __FILE__),
+            $this->getHumanName(), self::humanDuration((int) $age)));
+        return true;
+    }
+
+    /*
+     * Appelé CHAQUE MINUTE par le coeur (cron statique sur la classe du
+     * plugin). Il ne fait qu'une chose : constater les silences.
+     *
+     * Pourquoi un cron plutôt qu'un calcul à la lecture : un écran hors ligne
+     * est justement celui qui n'appelle plus. Aucun chemin de code ne s'exécute
+     * plus pour lui — il n'y a donc personne pour poser le zéro, et une valeur
+     * qui ne bouge plus resterait à 1 indéfiniment.
+     *
+     * Le coût est nul à l'échelle du parc : une lecture d'horodatage par écran,
+     * et une écriture seulement quand l'état change.
+     */
+    public static function cron() {
+        /* Les activés seulement : un écran désactivé reçoit déjà
+         * « unknown_device », il n'y a rien à surveiller. */
+        foreach (eqLogic::byType('glowscreen32', true) as $eqLogic) {
+            if (!$eqLogic->isOnline()) {
+                $eqLogic->noteOnline(false);
+            }
+        }
+        /* v3.1 : aucun mot de passe Wi-Fi ne survit à sa commande. */
+        self::purgeSecrets();
+    }
+
+    /*
+     * Retient le niveau Wi-Fi annoncé par la carte — contrat v2.1, paramètre
+     * optionnel de « ping ».
+     *
+     * Une valeur absente, non numérique ou hors bornes est IGNORÉE SANS
+     * ERREUR : le ping reste un ping, et une carte ne doit jamais voir sa
+     * liaison refusée parce qu'un diagnostic est mal formé.
+     *
+     * Aucune écriture de configuration ici, et c'est voulu : contrairement à
+     * « fw », le RSSI change à chaque ping par nature. Il va dans une commande
+     * d'information, dont c'est exactement le rôle — checkAndUpdateCmd()
+     * n'émet un événement que si la valeur a bougé, et l'historisation, si
+     * l'utilisateur l'active, est celle du coeur.
+     */
+    public function noteRssi($_rssi) {
+        $raw = trim((string) $_rssi);
+        if ($raw === '' || !is_numeric($raw)) {
+            return false;
+        }
+        $rssi = (int) $raw;
+        if ($rssi < self::RSSI_MIN || $rssi > self::RSSI_MAX) {
+            /* Debug et non warning : c'est un diagnostic, il arrive à chaque
+             * ping, et une carte qui déraille sur ce point ne doit pas noyer le
+             * journal. */
+            log::add('glowscreen32', 'debug', sprintf(
+                __('%1$s : niveau Wi-Fi hors bornes (%2$s dBm), ignoré.', __FILE__),
+                $this->getHumanName(), $rssi));
+            return false;
+        }
+        $seen = $this->seen();
+        if (isset($seen['rssi']) && (int) $seen['rssi'] === $rssi) {
+            return false;
+        }
+        /* Par ping, mais seulement s'il a CHANGÉ ; l'historique du coeur le
+         * lisse (historizeMode « avg » par défaut). */
+        $this->checkAndUpdateCmd('rssi', $rssi);
+        $this->seenSet(array('rssi' => $rssi));
+        return true;
+    }
+
+    /* Les causes de redémarrage du contrat v2.2 — vocabulaire fermé. */
+    const RESET_REASONS = array('poweron', 'sw', 'panic', 'wdt', 'brownout', 'ext', 'other');
+
+    /* Plafond de « heap » et « blk » : la carte n'a que 520 Kio de SRAM, et
+     * pas de PSRAM. */
+    const HEAP_MAX = 400000;
+
+    /*
+     * Les diagnostics optionnels du « ping » — contrat v2.2 : up, rst, heap,
+     * blk, ip, ssid.
+     *
+     * Même règle que « rssi » : tout ce qui est absent, mal formé ou hors
+     * bornes est IGNORÉ SANS ERREUR. Un diagnostic ne coûte jamais sa liaison
+     * à un écran. Chaque valeur va dans une commande d'information — jamais
+     * dans la configuration : l'API n'enregistre pas l'eqLogic.
+     */
+    public function noteDiagnostics($_params) {
+        $params = is_array($_params) ? $_params : array();
+        $get = function ($_key) use ($params) {
+            return isset($params[$_key]) ? trim((string) $params[$_key]) : '';
+        };
+        $noted = 0;
+        $now   = time();
+        $seen  = $this->seen();
+        $set   = array();
+        $due   = function ($_key) use ($seen, $now) {
+            return !isset($seen[$_key . 'T']) || ($now - (int) $seen[$_key . 'T']) >= glowscreen32::DIAG_INTERVAL;
+        };
+
+        $up = $get('up');
+        if ($up !== '' && ctype_digit($up) && strlen($up) <= 10 && (float) $up <= 4294967295) {
+            /* Toutes les 5 min, ou tout de suite si la carte a REDÉMARRÉ
+             * (durée qui recule) : c'est l'information qui compte. */
+            if ($due('up') || !isset($seen['up']) || (int) $up < (int) $seen['up']) {
+                $this->checkAndUpdateCmd('uptime', (int) $up);
+                $set['up'] = (int) $up;
+                $set['upT'] = $now;
+                $noted++;
+            }
+        }
+        $rst = strtolower($get('rst'));
+        if ($rst !== '' && in_array($rst, self::RESET_REASONS, true) && (!isset($seen['rst']) || $seen['rst'] !== $rst)) {
+            $this->checkAndUpdateCmd('resetreason', $rst);
+            $set['rst'] = $rst;
+            $noted++;
+        }
+        foreach (array('heap' => 'heap', 'blk' => 'maxblock') as $param => $logicalId) {
+            $value = $get($param);
+            if ($value !== '' && ctype_digit($value) && strlen($value) <= 6 && (int) $value <= self::HEAP_MAX) {
+                $last = isset($seen[$param]) ? (int) $seen[$param] : null;
+                /* Variation significative : plus de 10 %. */
+                $moved = ($last === null) || abs((int) $value - $last) > max(1024, $last / 10);
+                if ($moved || $due($param)) {
+                    $this->checkAndUpdateCmd($logicalId, (int) $value);
+                    $set[$param] = (int) $value;
+                    $set[$param . 'T'] = $now;
+                    $noted++;
+                }
+            }
+        }
+        $ip = $get('ip');
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false && (!isset($seen['ip']) || $seen['ip'] !== $ip)) {
+            $this->checkAndUpdateCmd('ip', $ip);
+            $set['ip'] = $ip;
+            $noted++;
+        }
+        /* Le SSID tel quel, mais sans caractère de contrôle, et 32 au plus :
+         * au-delà ce n'est pas un SSID. Il est échappé partout où il
+         * s'affiche. */
+        $ssid = isset($params['ssid']) ? (string) $params['ssid'] : '';
+        if ($ssid !== '' && mb_check_encoding($ssid, 'UTF-8') && mb_strlen($ssid) <= 32
+            && !preg_match('/[\x00-\x1F\x7F]/', $ssid) && (!isset($seen['ssid']) || $seen['ssid'] !== $ssid)) {
+            $this->checkAndUpdateCmd('ssid', $ssid);
+            $set['ssid'] = $ssid;
+            $noted++;
+        }
+        if (count($set) > 0) {
+            $this->seenSet($set);
+        }
+        return $noted;
+    }
+
+    /* La valeur courante d'une commande d'information de l'écran, ou ''. */
+    public function infoValue($_logicalId) {
+        $cmd = $this->getCmd('info', $_logicalId);
+        if (!is_object($cmd)) {
+            return '';
+        }
+        $value = $cmd->execCmd();
+        return ($value === null) ? '' : $value;
     }
 
     /* =========================================================== OTA
@@ -1892,24 +3425,88 @@ class glowscreen32 extends eqLogic {
     }
 
     /*
-     * L'URL publique du binaire. C'est elle qui part dans la réponse de
-     * « action=firmware », et c'est la carte — pas un navigateur authentifié —
-     * qui la télécharge : le fichier doit donc être servi en clair par Apache.
+     * L'URL du binaire, telle qu'elle part dans la réponse de « action=firmware ».
      *
-     * data/.htaccess porte « Deny from all » ; data/firmware/.htaccess rouvre
-     * les seuls fichiers .bin, exactement comme plugin_info/.htaccess rouvre
-     * les seules images. Sans cette exception, la carte reçoit un 403 au
-     * milieu de la mise à jour, et le journal d'Apache une ligne
-     * « client denied by server configuration ».
+     * ⚠️ CONTRAT v2.2 : le binaire n'est PLUS servi par Apache depuis data/.
+     * Le .htaccess RACINE de Jeedom (coeur, intouchable) porte un
+     * « RedirectMatch 403 » sur tout fichier situé sous un dossier data/ dont
+     * l'extension n'est pas dans sa liste — .bin n'y est pas. Aucun .htaccess de
+     * plugin ne peut lever un RedirectMatch : l'ancienne URL renvoyait 403 à
+     * coup sûr, et toute mise à jour échouait au premier octet.
+     *
+     * Le binaire passe donc par api.php (action=fwfile), dans core/php/, que le
+     * coeur laisse passer. Les firmwares déjà en service n'envoient AUCUN
+     * en-tête au téléchargement : l'autorisation tient dans un jeton aléatoire
+     * de l'URL, à durée de vie courte, plutôt que dans la clé API — qui
+     * finirait sinon en clair dans l'URL. Bénéfice au passage : le binaire, qui
+     * contient les secrets compilés, n'est plus téléchargeable par quiconque.
      */
-    public static function firmwareUrl($_file) {
+    public static function firmwareUrl($_token) {
         $root = '';
         try {
             $root = network::getNetworkAccess('internal');
         } catch (Throwable $e) {
             $root = '';
         }
-        return $root . '/plugins/glowscreen32/data/' . self::FIRMWARE_DIR . '/' . rawurlencode($_file);
+        return $root . '/plugins/glowscreen32/core/php/api.php?action=fwfile&token=' . rawurlencode($_token);
+    }
+
+    /* Durée de vie d'un jeton de téléchargement : large devant les 8 s d'un
+     * téléchargement réel, courte devant tout le reste. */
+    const FIRMWARE_TOKEN_TTL = 900;
+
+    /* Émet un jeton qui autorise le téléchargement du binaire $_file. */
+    /* v3.1 : le jeton est lié au binaire PAR SON EMPREINTE (sha256), et à
+     * l'écran pour lequel il a été émis — ses verrous sont relus au
+     * téléchargement. */
+    public static function firmwareToken($_firmware, $_eqId = 0) {
+        $token = bin2hex(random_bytes(16));
+        cache::set('glowscreen32::fwtoken::' . $token, array(
+            'file'   => $_firmware['file'],
+            'sha256' => $_firmware['sha256'],
+            'eq'     => (int) $_eqId,
+        ), self::FIRMWARE_TOKEN_TTL);
+        return $token;
+    }
+
+    /* Le chemin du binaire qu'autorise $_token, ou null. Le jeton n'est valable
+     * que pour le binaire déposé AU MOMENT de l'émission : un dépôt survenu
+     * entre-temps l'invalide plutôt que de servir un autre fichier que celui
+     * dont la carte a reçu l'empreinte. */
+    public static function firmwareForToken($_token, &$_why = null) {
+        $_why = '';
+        if (!is_string($_token) || !preg_match('/^[0-9a-f]{32}$/', $_token)) {
+            $_why = 'malformed';
+            return null;
+        }
+        $grant = cache::byKey('glowscreen32::fwtoken::' . $_token)->getValue('');
+        if (!is_array($grant) || !isset($grant['file'], $grant['sha256'])) {
+            /* Inconnu, expiré — ou au format d'avant la v3.1 : la carte en
+             * redemandera un au prochain contrôle. */
+            $_why = 'unknown';
+            return null;
+        }
+        $firmware = self::firmware();
+        if ($firmware === null || !$firmware['exists'] || $firmware['file'] !== $grant['file']
+            || $firmware['sha256'] !== $grant['sha256']) {
+            $_why = 'replaced';
+            return null;
+        }
+        /* OTA refermé depuis l'émission — verrou global ou verrou de l'écran :
+         * fermer un verrou doit arrêter AUSSI les téléchargements en cours de
+         * démarrage, pas seulement les prochaines décisions. */
+        if (!self::otaEnabled()) {
+            $_why = 'locked';
+            return null;
+        }
+        if ($grant['eq'] > 0) {
+            $eqLogic = self::byId($grant['eq']);
+            if (!is_object($eqLogic) || !$eqLogic->otaAllowed()) {
+                $_why = 'locked';
+                return null;
+            }
+        }
+        return $firmware;
     }
 
     /*
@@ -1936,7 +3533,9 @@ class glowscreen32 extends eqLogic {
             'size'    => (int) config::byKey('firmware_size', 'glowscreen32', 0),
             'human'   => self::humanSize((int) config::byKey('firmware_size', 'glowscreen32', 0)),
             'date'    => trim((string) config::byKey('firmware_date', 'glowscreen32', '')),
-            'url'     => self::firmwareUrl($file),
+            /* Affichage seulement : l'URL réelle porte un jeton émis à chaque
+             * décision OTA accordée (voir firmwareUrl). */
+            'url'     => self::firmwareUrl('') . '…',
         );
     }
 
@@ -2136,10 +3735,15 @@ class glowscreen32 extends eqLogic {
         /* move_uploaded_file quand le fichier vient bien d'un téléversement :
          * c'est la seule forme qui vérifie que le chemin reçu est un fichier
          * temporaire de PHP et non un chemin choisi par l'appelant. */
+        /* v3.1 : ATOMIQUE — écrit sous un nom temporaire du même dossier, puis
+         * renommé. Une carte qui télécharge pendant un dépôt ne lit jamais un
+         * fichier à moitié écrit. */
+        $partial = $dir . '/.upload-' . bin2hex(random_bytes(6)) . '.part';
         $moved = is_uploaded_file($_tmpPath)
-            ? @move_uploaded_file($_tmpPath, $path)
-            : @copy($_tmpPath, $path);
-        if (!$moved || !is_file($path)) {
+            ? @move_uploaded_file($_tmpPath, $partial)
+            : @copy($_tmpPath, $partial);
+        if (!$moved || !is_file($partial) || !@rename($partial, $path)) {
+            @unlink($partial);
             throw new Exception(sprintf(__('L\'écriture de %s a échoué.', __FILE__), $path));
         }
         /* Lisible par Apache, qui le sert à la carte. */
@@ -2213,34 +3817,43 @@ class glowscreen32 extends eqLogic {
         return ((int) $this->getConfiguration('ota_allowed', 0)) === 1;
     }
 
-    /* La version que la carte a annoncée la dernière fois. */
+    /*
+     * La version que la carte a annoncée la dernière fois.
+     *
+     * v2.2 : lue dans la commande « Version du firmware », que l'API est seule
+     * à écrire. La clé de configuration « fw » n'est plus écrite (l'API
+     * n'enregistre plus l'eqLogic) et ne sert que de repli pour un écran qui
+     * n'a pas rappelé depuis la mise à jour du plugin.
+     */
     public function firmwareVersion() {
-        return trim((string) $this->getConfiguration('fw', ''));
+        $cmd = $this->getCmd('info', 'firmware');
+        $fw  = is_object($cmd) ? trim((string) $cmd->execCmd()) : '';
+        return ($fw !== '') ? $fw : trim((string) $this->getConfiguration('fw', ''));
     }
 
     /*
      * Retient la version annoncée par la carte.
      *
-     * N'écrit QUE si elle a changé : la carte l'annonce à chaque interrogation,
-     * et réécrire la même chaîne toutes les trente secondes ferait le même
-     * gâchis que d'horodater chaque ping. Une mise à jour réussie, elle, est
-     * exactement le moment où l'écriture a lieu — et le journal la note.
+     * N'écrit QUE si elle a changé, et le journal note la transition — une
+     * mise à jour réussie est exactement le moment où l'écriture a lieu.
      *
-     * save(true) : écriture directe, sans preSave() ni postSave(). Une carte
-     * qui dit sa version ne doit ni recalculer la signature de mise en page, ni
-     * faire bouger le compteur de version, ni recréer les commandes.
+     * v2.2 : dans la commande d'information seulement. Plus de save() de
+     * l'eqLogic depuis l'API (voir noteContact).
      */
     public function noteFirmware($_fw) {
         $fw = self::sanitizeVersion($_fw);
         if ($fw === '') {
             return false;
         }
+        $seen = $this->seen();
+        if (isset($seen['fw']) && $seen['fw'] === $fw) {
+            return false;
+        }
         $known = $this->firmwareVersion();
+        $this->seenSet(array('fw' => $fw));
         if ($fw === $known) {
             return false;
         }
-        $this->setConfiguration('fw', $fw);
-        $this->save(true);
         $this->checkAndUpdateCmd('firmware', $fw);
         log::add('glowscreen32', 'info', sprintf(
             ($known === '')
@@ -2318,7 +3931,7 @@ class glowscreen32 extends eqLogic {
             'ok'      => true,
             'update'  => true,
             'version' => $firmware['version'],
-            'url'     => $firmware['url'],
+            'url'     => self::firmwareUrl(self::firmwareToken($firmware, $this->getId())),
             'sha256'  => $firmware['sha256'],
             'size'    => $firmware['size'],
         );
@@ -2326,7 +3939,38 @@ class glowscreen32 extends eqLogic {
 
     /* ==================================================== CYCLE DE VIE eqLogic */
 
+    /*
+     * Les bornes de longueur, refusées à l'ENREGISTREMENT sur ce qui a été
+     * REÇU (contrat v3.0, revue) — en caractères, pas en octets. Ce qui
+     * arrive malgré tout hors bornes par un autre chemin est tronqué ET
+     * journalisé à la lecture.
+     */
+    public static function checkLengths($_rawButtons, $_rawPages) {
+        foreach ((is_array($_rawPages) ? $_rawPages : array()) as $id => $page) {
+            if (is_array($page) && isset($page['title']) && mb_strlen(trim((string) $page['title'])) > self::TITLE_MAX) {
+                throw new Exception(sprintf(__('Le titre de la page %1$s dépasse %2$s caractères.', __FILE__), ((int) $id) + 1, self::TITLE_MAX));
+            }
+        }
+        foreach ((is_array($_rawButtons) ? $_rawButtons : array()) as $index => $button) {
+            if (!is_array($button)) {
+                continue;
+            }
+            if (isset($button['label']) && mb_strlen(trim((string) $button['label'])) > self::LABEL_MAX) {
+                throw new Exception(sprintf(__('Bouton %1$s : le libellé « %2$s » dépasse %3$s caractères.', __FILE__),
+                    $index + 1, self::logSafe($button['label'], 40), self::LABEL_MAX));
+            }
+            $fmt = (isset($button['fmt']) && is_array($button['fmt'])) ? $button['fmt'] : array();
+            foreach ($fmt as $key => $value) {
+                if (preg_match('/^(l0|l1|m\d+l)$/', (string) $key) && mb_strlen(trim((string) $value)) > self::VALUE_MAX) {
+                    throw new Exception(sprintf(__('Bouton %1$s : le libellé « %2$s » dépasse %3$s caractères — la tuile ne peut en afficher que %3$s.', __FILE__),
+                        $index + 1, self::logSafe($value, 40), self::VALUE_MAX));
+                }
+            }
+        }
+    }
+
     public function preSave() {
+        $this->forgetMemo();
         /*
          * Aucune exception sur un équipement qui vient de naître : le coeur le
          * crée avec son seul nom, et toute validation rendrait le bouton
@@ -2392,6 +4036,7 @@ class glowscreen32 extends eqLogic {
                 count($raw), self::MAX_BUTTONS));
         }
 
+        self::checkLengths($raw, $this->getConfiguration('pages', array()));
         $buttons = $this->buttons();
         /* Refusé AVANT l'écriture : un interrupteur sans état s'enregistrerait
          * sans rien dire et se découvrirait sur le mur, un appui sur deux. */
@@ -2403,20 +4048,29 @@ class glowscreen32 extends eqLogic {
         $this->setConfiguration('grid', $this->grid());
         $this->setConfiguration('swipe', $this->swipe() ? 1 : 0);
         $this->setConfiguration('clock', $this->clock() ? 1 : 0);
+        $this->setConfiguration('readonly', $this->readOnly() ? 1 : 0);
         /* Remis en minutes entières : ce qui est relu est ce qui est écrit, et
          * un champ laissé vide retombe sur le défaut plutôt que sur zéro. */
         $this->setConfiguration('info_max_age', (int) ($this->infoMaxAge() / 60));
 
         /* Le nombre de boutons par page, contrôlé APRÈS la mise en forme —
          * c'est elle qui décide de la page de chacun. */
-        $perPage = array();
+        /* v3.1 : contre la grille RÉELLE de l'écran (pageCapacity), et non
+         * plus contre le seul plafond 4×3 — sinon un bouton de trop était
+         * accepté puis jamais servi. */
+        $capacity = $this->pageCapacity();
+        $perPage  = array();
         foreach ($buttons as $button) {
+            if (!self::buttonConfigured($button)) {
+                continue;
+            }
             $page = $button['page'];
             $perPage[$page] = (isset($perPage[$page]) ? $perPage[$page] : 0) + 1;
-            if ($perPage[$page] > self::MAX_BUTTONS_PER_PAGE) {
+            if ($perPage[$page] > $capacity) {
+                $grid = $this->grid();
                 throw new Exception(sprintf(
-                    __('La page %1$s porte plus de %2$s boutons : c\'est le maximum d\'une grille 4×3.', __FILE__),
-                    $page + 1, self::MAX_BUTTONS_PER_PAGE));
+                    __('La page %1$s porte plus de %2$s boutons : c\'est tout ce que tient la grille %3$s×%4$s de cet écran.', __FILE__),
+                    $page + 1, $capacity, $grid['cols'], $grid['rows']));
             }
         }
 
@@ -2446,9 +4100,9 @@ class glowscreen32 extends eqLogic {
      * le seul endroit où l'utilisateur regarde encore le formulaire.
      *
      * Une commande d'état DÉSIGNÉE mais supprimée depuis n'est pas refusée : le
-     * bouton disparaît alors simplement de la mise en page, avec une ligne de
-     * journal. Bloquer la sauvegarde là-dessus empêcherait de corriger quoi que
-     * ce soit d'autre sur l'écran.
+     * bouton reste alors à sa place, INERTE (rang conservé, contrat v3.0), avec
+     * une ligne de journal. Bloquer la sauvegarde là-dessus empêcherait de
+     * corriger quoi que ce soit d'autre sur l'écran.
      */
     public static function checkButtons($_buttons) {
         foreach ($_buttons as $index => $button) {
@@ -2468,6 +4122,51 @@ class glowscreen32 extends eqLogic {
                     throw new Exception(sprintf(
                         __('%s : ce bouton de navigation ouvre la page sur laquelle il se trouve déjà. Il ne ferait rien.', __FILE__),
                         self::buttonWhere($index, $button)));
+                }
+                continue;
+            }
+            /* v3.0 : une tuile « valeur » qui ne montre rien, ou qui montre
+             * une commande d'ACTION, est refusée — elle afficherait « — » pour
+             * toujours, et l'on croirait le capteur en panne. */
+            if ($button['mode'] === self::MODE_VIEW) {
+                if ($button['view'] === '') {
+                    throw new Exception(sprintf(
+                        __('%s : une tuile « valeur » doit désigner la commande d\'information qu\'elle affiche.', __FILE__),
+                        self::buttonWhere($index, $button)));
+                }
+                try {
+                    $viewCmd = cmd::byString($button['view']);
+                } catch (Throwable $e) {
+                    $viewCmd = null;
+                }
+                if (is_object($viewCmd) && $viewCmd->getType() != 'info') {
+                    throw new Exception(sprintf(
+                        __('%s : une tuile « valeur » affiche une commande d\'INFORMATION, pas une commande d\'action.', __FILE__),
+                        self::buttonWhere($index, $button)));
+                }
+                continue;
+            }
+            /* v3.1 : un bouton « action » sans cible, ou qui vise une commande
+             * d'INFORMATION, est refusé — il serait servi inerte, et l'on
+             * croirait l'écran en panne. */
+            if ($button['mode'] === self::MODE_ACTION) {
+                $where = self::buttonWhere($index, $button);
+                if ($button['target'] === self::TARGET_NONE
+                    || ($button['target'] === self::TARGET_CMD && $button['cmd'] === '')
+                    || ($button['target'] === self::TARGET_SCENARIO && $button['scenario'] <= 0)) {
+                    throw new Exception(sprintf(
+                        __('%s : un bouton « action simple » doit désigner une commande ou un scénario. Videz la case si elle ne doit rien porter.', __FILE__), $where));
+                }
+                if ($button['target'] === self::TARGET_CMD) {
+                    try {
+                        $target = cmd::byString($button['cmd']);
+                    } catch (Throwable $e) {
+                        $target = null;
+                    }
+                    if (is_object($target) && $target->getType() != 'action') {
+                        throw new Exception(sprintf(
+                            __('%s : la commande déclenchée doit être une commande d\'ACTION, pas une commande d\'information.', __FILE__), $where));
+                    }
                 }
                 continue;
             }
@@ -2527,8 +4226,14 @@ class glowscreen32 extends eqLogic {
     }
 
     public function postSave() {
+        $this->forgetMemo();
         $this->createCommands();
         $this->checkAndUpdateCmd('version', $this->version());
+        /* v2.2 : le listener suit les commandes d'état et le bandeau tels
+         * qu'ils viennent d'être enregistrés, et un ping retenu est réveillé —
+         * « version » a pu changer, et la réponse doit le dire tout de suite. */
+        $this->updateListener();
+        self::wakeScreen($this->getId());
 
         log::add('glowscreen32', 'info', sprintf(
             __('%1$s : configuration enregistrée, version %2$s, %3$s bouton(s) actif(s).', __FILE__),
@@ -2538,6 +4243,113 @@ class glowscreen32 extends eqLogic {
              * dire au journal un chiffre qui dépend du schéma de l'appelant. */
             $this->getHumanName(), $this->version(), count($this->activeButtons())
         ));
+    }
+
+    /*
+     * « Dupliquer » — v3.1. Le coeur clone l'équipement puis l'enregistre :
+     * avec la même MAC, preSave() refusait la copie (« MAC déjà celle de… »).
+     * La copie part donc SANS ce qui identifie la carte ou son historique —
+     * MAC, logicalId, verrou OTA, firmware annoncé, signature, contact — et
+     * l'original n'est modifié qu'en mémoire, le temps du clonage.
+     */
+    public function copy($_name) {
+        $keys  = array('mac', 'ota_allowed', 'fw', 'layout_signature', 'lastcontact', 'info_stale');
+        $saved = array();
+        foreach ($keys as $key) {
+            $saved[$key] = $this->getConfiguration($key, null);
+            $this->setConfiguration($key, ($key === 'ota_allowed') ? 0 : '');
+        }
+        $logicalId = $this->getLogicalId();
+        $this->setLogicalId('');
+        try {
+            return parent::copy($_name);
+        } finally {
+            foreach ($saved as $key => $value) {
+                $this->setConfiguration($key, $value);
+            }
+            $this->setLogicalId($logicalId);
+        }
+    }
+
+    /* Exclu des sauvegardes Jeedom (install/backup.php) : les mots de passe
+     * Wi-Fi en attente de livraison — v3.1. */
+    public static function backupExclude() {
+        return array('data/secrets');
+    }
+
+    /*
+     * Une commande « sensible » — v3.1 : portail, porte, garage, serrure,
+     * alarme. Sert à AVERTIR dans la page (bandeau, ⚠ dans l'aperçu, rappel de
+     * la lecture seule), jamais à refuser.
+     */
+    public static function isSensitiveCmd($_cmd) {
+        if (!is_object($_cmd)) {
+            return false;
+        }
+        $type = strtoupper((string) $_cmd->getGeneric_type());
+        foreach (array('GB_', 'GARAGE_', 'LOCK_', 'ALARM_', 'BARRIER_') as $prefix) {
+            if (strpos($type, $prefix) === 0) {
+                return true;
+            }
+        }
+        $name = $_cmd->getName();
+        $eqLogic = $_cmd->getEqLogic();
+        if (is_object($eqLogic)) {
+            $name .= ' ' . $eqLogic->getName();
+        }
+        $name = strtolower(self::stripAccents($name));
+        foreach (array('portail', 'porte', 'garage', 'alarme', 'serrure') as $word) {
+            if (strpos($name, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static function stripAccents($_text) {
+        $text = (string) $_text;
+        $plain = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text);
+        return ($plain === false) ? $text : $plain;
+    }
+
+    /* Les commandes d'action d'un bouton qui sont sensibles, par champ. */
+    public static function sensitiveFields($_button) {
+        $found = array();
+        if ($_button['mode'] === self::MODE_ACTION && $_button['target'] === self::TARGET_CMD) {
+            $fields = array('cmd');
+        } elseif ($_button['mode'] === self::MODE_TOGGLE) {
+            $fields = array('on', 'off', 'toggle');
+        } else {
+            return $found;
+        }
+        foreach ($fields as $field) {
+            $cmd = self::actionCmd($_button, $field);
+            if ($cmd !== null && self::isSensitiveCmd($cmd)) {
+                $found[] = $field;
+            }
+        }
+        return $found;
+    }
+
+    /* v2.2 : rien ne doit survivre à l'écran — ni son listener, qui
+     * réveillerait un fichier orphelin à chaque changement d'état, ni sa file
+     * de commandes, ni les fichiers de l'attente longue. Le seq, lui, est
+     * effacé aussi : une MAC réattribuée à un nouvel équipement repart d'un
+     * nouvel identifiant, donc d'une nouvelle clé. */
+    public function preRemove() {
+        $this->removeListener();
+        $id = (int) $this->getId();
+        foreach (array('queue', 'incomplete', 'infostale') as $kind) {
+            cache::delete('glowscreen32::' . $kind . '::' . $id);
+        }
+        foreach (array('wake', 'hold', 'lock') as $kind) {
+            @unlink(self::holdPath($kind, $id));
+        }
+        config::remove('cmdseq::' . $id, 'glowscreen32');
+        foreach ((array) @glob(self::secretDir() . '/wifi-' . $id . '-*') as $file) {
+            @unlink($file);
+        }
+        cache::delete('glowscreen32::seen::' . $id);
     }
 
     /*
@@ -2571,6 +4383,119 @@ class glowscreen32 extends eqLogic {
                 'subType' => 'string',
                 'icon'    => 'fas fa-microchip',
             ),
+            /*
+             * v2.1. La présence, enfin exploitable ailleurs que dans le tableau
+             * du parc : c'est elle qui permet d'être PRÉVENU qu'un panneau
+             * mural est devenu noir, au lieu de s'en apercevoir en passant
+             * devant.
+             */
+            'online' => array(
+                'name'    => __('En ligne', __FILE__),
+                'subType' => 'binary',
+                'icon'    => 'fas fa-plug',
+            ),
+            /*
+             * v2.1. Le niveau Wi-Fi annoncé par la carte. Première cause de
+             * panne du projet, et la plus trompeuse : les « ping » passent
+             * encore là où un « press » se perd (-88 dBm) et où un OTA meurt à
+             * 2 % (-92/-93 dBm). Le bandeau l'affiche déjà sous -75 dBm, mais
+             * il faut se tenir devant l'écran pour le lire.
+             */
+            'rssi' => array(
+                'name'    => __('Niveau Wi-Fi', __FILE__),
+                'subType' => 'numeric',
+                'icon'    => 'fas fa-wifi',
+                'unite'   => 'dBm',
+                'history' => 1,
+            ),
+            /*
+             * v2.2 — les diagnostics du ping. « rst=panic » ou « wdt » signale
+             * un firmware qui plante sans que personne ne le voie ; « heap » et
+             * surtout « blk » mesurent la fragmentation qui, sans PSRAM, finit
+             * par faire échouer une allocation ; « ip » et « ssid » disent où
+             * est l'écran sans débrancher personne. rssi, heap et blk sont
+             * historisés : c'est leur évolution qui parle.
+             */
+            'uptime' => array(
+                'name'    => __('Durée de fonctionnement', __FILE__),
+                'subType' => 'numeric',
+                'icon'    => 'fas fa-stopwatch',
+                'unite'   => 's',
+            ),
+            'resetreason' => array(
+                'name'    => __('Cause du redémarrage', __FILE__),
+                'subType' => 'string',
+                'icon'    => 'fas fa-redo',
+            ),
+            'heap' => array(
+                'name'    => __('Mémoire libre', __FILE__),
+                'subType' => 'numeric',
+                'icon'    => 'fas fa-memory',
+                'unite'   => 'o',
+                'history' => 1,
+            ),
+            'maxblock' => array(
+                'name'    => __('Plus gros bloc libre', __FILE__),
+                'subType' => 'numeric',
+                'icon'    => 'fas fa-cubes',
+                'unite'   => 'o',
+                'history' => 1,
+            ),
+            'ip' => array(
+                'name'    => __('Adresse IP', __FILE__),
+                'subType' => 'string',
+                'icon'    => 'fas fa-network-wired',
+            ),
+            'ssid' => array(
+                'name'    => __('Réseau Wi-Fi', __FILE__),
+                'subType' => 'string',
+                'icon'    => 'fas fa-broadcast-tower',
+            ),
+            /*
+             * v2.2 — les commandes à distance. Chaque verbe du contrat SAUF
+             * « wifi » devient une commande action : utilisable depuis le
+             * dashboard et depuis un scénario. execute() la met en file ; le
+             * prochain ping de la carte la livre. « wifi » fait transiter un
+             * mot de passe : il ne part que de la page de l'équipement.
+             */
+            'cmd_reboot' => array(
+                'name'    => __('Redémarrer', __FILE__),
+                'type'    => 'action',
+                'subType' => 'other',
+                'icon'    => 'fas fa-power-off',
+            ),
+            'cmd_identify' => array(
+                'name'    => __('Identifier', __FILE__),
+                'type'    => 'action',
+                'subType' => 'other',
+                'icon'    => 'fas fa-lightbulb',
+            ),
+            'cmd_message' => array(
+                'name'    => __('Message', __FILE__),
+                'type'    => 'action',
+                'subType' => 'message',
+                'icon'    => 'fas fa-comment',
+            ),
+            'cmd_page' => array(
+                'name'    => __('Page', __FILE__),
+                'type'    => 'action',
+                'subType' => 'slider',
+                'icon'    => 'fas fa-columns',
+                'min'     => 0,
+                'max'     => self::MAX_PAGES - 1,
+            ),
+            'cmd_calibrate' => array(
+                'name'    => __('Calibrer', __FILE__),
+                'type'    => 'action',
+                'subType' => 'other',
+                'icon'    => 'fas fa-crosshairs',
+            ),
+            'cmd_ota' => array(
+                'name'    => __('Vérifier firmware', __FILE__),
+                'type'    => 'action',
+                'subType' => 'other',
+                'icon'    => 'fas fa-sync',
+            ),
         );
 
         foreach ($definitions as $logicalId => $definition) {
@@ -2582,10 +4507,26 @@ class glowscreen32 extends eqLogic {
             $cmd->setEqLogic_id($this->getId());
             $cmd->setLogicalId($logicalId);
             $cmd->setName($definition['name']);
-            $cmd->setType('info');
+            $cmd->setType(isset($definition['type']) ? $definition['type'] : 'info');
             $cmd->setSubType($definition['subType']);
             $cmd->setIsVisible(1);
-            $cmd->setDisplay('icon', $definition['icon']);
+            $cmd->setDisplay('icon', '<i class="' . $definition['icon'] . '"></i>');
+            if (isset($definition['unite'])) {
+                $cmd->setUnite($definition['unite']);
+            }
+            if (isset($definition['history'])) {
+                $cmd->setIsHistorized(1);
+            }
+            if (isset($definition['min'])) {
+                $cmd->setConfiguration('minValue', $definition['min']);
+                $cmd->setConfiguration('maxValue', $definition['max']);
+            }
+            if ($definition['subType'] === 'message') {
+                /* Le champ « titre » d'une commande message porte la DURÉE, en
+                 * secondes, optionnelle : 30 s si vide. */
+                $cmd->setDisplay('title_placeholder', __('Durée (s), 30 par défaut', __FILE__));
+                $cmd->setDisplay('message_placeholder', __('Texte, 64 caractères au plus', __FILE__));
+            }
             $cmd->save();
         }
     }
@@ -2650,6 +4591,14 @@ class glowscreen32 extends eqLogic {
                 'human'   => self::humanContact($contact),
                 'age'     => $eqLogic->contactAge(),
                 'online'  => $eqLogic->isOnline(),
+                /* v2.2 : lus dans les commandes d'information que l'API est
+                 * seule à écrire. */
+                'ip'      => (string) $eqLogic->infoValue('ip'),
+                'uptime'  => $eqLogic->infoValue('uptime'),
+                'uptimeHuman' => (is_numeric($eqLogic->infoValue('uptime')) ? self::humanDuration((int) $eqLogic->infoValue('uptime')) : ''),
+                'rst'     => (string) $eqLogic->infoValue('resetreason'),
+                'rssi'    => $eqLogic->infoValue('rssi'),
+                'queue'   => $eqLogic->commandCount(),
             );
         }
         return $screens;
@@ -2657,15 +4606,46 @@ class glowscreen32 extends eqLogic {
 }
 
 /*
- * La classe des commandes est obligatoire, même réduite à sa plus simple
- * expression : sans elle, l'enregistrement d'un équipement échoue.
+ * La classe des commandes est obligatoire : sans elle, l'enregistrement d'un
+ * équipement échoue.
  *
- * Toutes les commandes du plugin sont des informations, écrites par l'API au fil
- * des échanges avec la carte : il n'y a rien à exécuter.
+ * Les commandes d'INFORMATION sont écrites par l'API au fil des échanges avec la
+ * carte : il n'y a rien à exécuter. Les commandes d'ACTION (v2.2) mettent une
+ * commande à distance en file ; le prochain ping de la carte la livre — dans la
+ * seconde si un ping est retenu.
  */
 class glowscreen32Cmd extends cmd {
 
+    const VERBS = array(
+        'cmd_reboot'    => 'reboot',
+        'cmd_identify'  => 'identify',
+        'cmd_message'   => 'message',
+        'cmd_page'      => 'page',
+        'cmd_calibrate' => 'calibrate',
+        'cmd_ota'       => 'ota',
+    );
+
     public function execute($_options = array()) {
+        if ($this->getType() != 'action') {
+            return true;
+        }
+        $verb = isset(self::VERBS[$this->getLogicalId()]) ? self::VERBS[$this->getLogicalId()] : null;
+        if ($verb === null) {
+            throw new Exception(sprintf(__('Commande inconnue : %s', __FILE__), $this->getLogicalId()));
+        }
+        $eqLogic = $this->getEqLogic();
+        if (!is_object($eqLogic) || $eqLogic->getIsEnable() != 1) {
+            throw new Exception(__('Écran introuvable ou désactivé.', __FILE__));
+        }
+        $options = is_array($_options) ? $_options : array();
+        $args = array();
+        if ($verb === 'message') {
+            $args['text']     = isset($options['message']) ? $options['message'] : '';
+            $args['duration'] = isset($options['title']) ? $options['title'] : '';
+        } elseif ($verb === 'page') {
+            $args['page'] = isset($options['slider']) ? $options['slider'] : 0;
+        }
+        $eqLogic->enqueueCommand($verb, $args);
         return true;
     }
 }

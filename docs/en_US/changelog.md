@@ -1,5 +1,123 @@
 # Changelog
 
+## 3.1
+
+Fixes from a full review. The schema does not change.
+
+- **An unresolved button keeps its rank** (deleted or recreated command). It
+  used to be dropped from the flattening, shifting every following `id`
+  without a `version` change — a press fired **the neighbouring button**. It
+  is now served inert (`state`/`value` null), its `press` answers
+  `unknown_button`, and the fault is logged once.
+- **`press` guard**: refused if the button at that rank changed since the last
+  `layout` served to that screen in that schema.
+- **Cheaper `ping`**: commands resolved once per request, `states` and
+  `values` in one pass, held requests recheck every 15 s, contact/Wi-Fi/
+  diagnostics written only on change (`up`, `heap`, `blk` at most every 5 min
+  or on a >10 % move).
+- Pages over the real grid, over-long labels/titles (in characters) and
+  "action" buttons without a target are refused on save.
+- **Wi-Fi password out of the Jeedom cache**: 0600 file under `data/secrets`
+  (excluded from backups and deployment), deleted on delivery or expiry.
+- "Duplicate" works: the copy leaves without MAC, OTA lock, firmware or
+  signature.
+- **"Sensitive command" warning** (gate, door, garage, lock, alarm).
+- `fwfile`: token bound to the binary's SHA-256, refused if an OTA lock was
+  closed since issue; atomic firmware upload.
+- API hardening: array parameters refused, strict `id`, unreadable `fw` →
+  `bad_request`, control characters stripped from logs, invalid UTF-8
+  repaired, `Content-Length` on every answer. `poll` out of range → 30;
+  banner numbers as "21,4".
+
+## 3.0
+
+Value tiles and read-only screens — **schema 3**. This time the schema number
+moves, and it has to: a schema 2 board would take a value tile for a button.
+
+- **Negotiation.** Header `3` → schema 3; `2` → schema 2 **without any value
+  tile**, `id`s recomputed over what remains; `1` (or none) → unchanged, byte
+  for byte. `press` resolves the rank in the flattening of the request's
+  schema: **the same button has different `id`s in different schemas.**
+- **"Value" mode.** A tile that shows an info command instead of acting: door,
+  alarm, heating, temperature. The plugin formats it (`value`, at most 16
+  chars) and gives it a meaning (`tone`: neutral, ok, warn, alert); the board
+  only displays. Binary: label and tone for 0 and 1, invert. Numeric: unit,
+  decimals, ascending thresholds. Text: value → label + tone table. Prefilled
+  from the Jeedom generic type, with a **preview of the real formatted value**
+  in the page — what "1" means varies from one module to another.
+- **Value tile staleness**: "—" when the command's device is disabled or in
+  Jeedom communication alert; a numeric value also goes stale after 60 min
+  without collection (configurable, 0 = never). Binary and text: no default
+  threshold — a door closed for three days sends nothing and is right.
+- **`values`** in schema 3 `ping` (same length as `states`); `rev` covers it and
+  the listener watches value tile commands.
+- **Read-only** (Screen tab checkbox): `ui.readonly` in schema 3, and **every
+  `press` from that screen is refused by the plugin** (`403 read_only`, before
+  any resolution), whatever the firmware.
+- A `press` on a value tile answers `unknown_button`, logged.
+
+## 2.2
+
+Responsiveness and fleet operation. **The schema stays 2**: 2.2 only adds
+optional request parameters and response fields a 2.0/2.1 board does not read.
+**Schema 1 is served byte for byte as before.**
+
+- **The API never saves the device any more** (normative rule of contract
+  2.2). Last contact, firmware version and banner staleness used to be written
+  through `save(true)` — the whole eqLogic as loaded at the start of the
+  request, silently overwriting any configuration saved meanwhile. They now go
+  to info commands (contact, firmware) and to the cache (staleness). The fleet
+  table, offline detection and the device page read those commands.
+- **Long-poll `ping`** (`wait`, `rev`), schema 2 only: a state change made
+  elsewhere reaches the screen in about a second instead of `poll`. Schema 2
+  `layout` and `ping` answers carry `features: {wait: 25, cmd: true}` and
+  `rev`. A held request rereads a wake counter four times a second **without
+  any SQL query**; a Jeedom *listener* on the buttons' state commands and the
+  banner command moves that counter. A new request from the same screen
+  releases the previous one.
+- **Remote commands**: Reboot, Identify, Message, Page, Calibrate, Check
+  firmware — usable from the dashboard and from scenarios. Queue of 8 per
+  screen, 10-minute lifetime, **at-most-once** delivery, increasing persistent
+  `seq`. The Wi-Fi change, which carries a password, can only be sent from the
+  device page.
+- **Diagnostics** attached to `ping` by firmware 2.2 (`up`, `rst`, `heap`,
+  `blk`, `ip`, `ssid`): six new info commands; Wi-Fi level, free heap and
+  largest free block are historized. IP address, uptime and last reset cause
+  show in the fleet table.
+- The "incomplete button" warning is no longer written on every `ping`, only on
+  transitions — essential with long polling.
+- Help texts fixed: "offline" past `3 × 2 × poll`, not "three intervals".
+  Screen name and page titles escaped in the page (XSS).
+
+## 2.1
+
+Three comfort fixes, no break. **The schema number does not move**: 2.1 only
+adds an optional *request* parameter, and a parameter a server does not know is
+a parameter it ignores. A 2.0 firmware talks to this plugin unchanged, and the
+other way round.
+
+- **The log no longer floods when the banner goes stale.** `infoText()` logged
+  on every call — every `ping`, every `layout`: eight identical lines for a
+  single save, then two a minute per screen, forever. The message stays (a
+  command that is no longer collected is a real and silent failure) but it is
+  written **only on transitions**, return to normal included — exactly what
+  `noteFirmware()` already does for the board's version.
+- **"Online" command** (binary) and a **one-minute cron**. `isOnline()` fed
+  nothing but an icon in the fleet table, so no scenario could react to a wall
+  panel gone dark. It turns 1 as soon as a call arrives; the cron puts it back
+  to 0, since an offline screen is precisely the one no longer calling.
+- **"Wi-Fi level" command** (numeric, dBm), fed by the optional `rssi`
+  parameter of `ping`. The project's leading cause of failure, and its most
+  misleading one: `ping` still gets through where a `press` is lost (−88 dBm)
+  and an OTA dies at 2 % (−92/−93 dBm).
+- **Offline threshold recomputed on `3 × 2 × poll`.** The board stretches its
+  `ping` to `2 × poll` once its screen dims (contract 2.1); the threshold had
+  to follow, or **the whole fleet would have gone offline every night** while
+  every board worked perfectly. An alert that cries wolf nightly is one people
+  stop believing — and it would stay silent the day a screen really dies.
+- Both new commands are **created retroactively** on existing devices when the
+  plugin updates: nothing to reopen or re-save by hand.
+
 ## 2.0
 
 Schema 2 of the API contract: pages, an adjustable grid, a banner — and **schema

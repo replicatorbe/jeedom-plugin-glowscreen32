@@ -22,3 +22,4 @@ Thumbs.db
 # Un firmware déposé depuis la page du plugin : il vit dans l'installation, pas
 # dans le dépôt, et pèse un mégaoctet par version.
 data/firmware/*.bin
+data/secrets/
