@@ -19,9 +19,11 @@ son identité en lisant sa propre adresse MAC au démarrage.
 2. **Adresse MAC.** Avec ou sans séparateurs, en majuscules ou en minuscules :
    `24:6F:28:12:34:56`, `24-6f-28-12-34-56` et `246f28123456` désignent la même
    carte. Le plugin normalise et refuse deux écrans portant la même adresse.
-3. **Onglet Boutons.** Six emplacements, dans l'ordre de la grille 3×2 : les
-   trois premiers en haut, les trois suivants dessous. Pour chacun, un libellé,
-   une couleur, une icône, et un **mode** — voir ci-dessous. L'aperçu à droite
+3. **Onglet Boutons.** Jusqu'à quatre pages, douze boutons par page, trente-deux
+   en tout. La grille de chaque page se règle dans l'onglet Écran (3×3 par
+   défaut) ; une carte dont le firmware est antérieur à la v2 ne sait dessiner
+   que 3×2 et ne reçoit que les six premiers boutons. Pour chaque bouton, un
+   libellé, une couleur, une icône, et un **mode** — voir ci-dessous. L'aperçu
    montre l'écran tel que la carte le dessinera, avec le rang de chaque bouton.
 4. **Sauvegardez.** Le compteur de version augmente, et la carte redessine à sa
    prochaine vérification.

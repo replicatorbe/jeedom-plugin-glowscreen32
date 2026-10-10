@@ -18,9 +18,12 @@ by reading its own MAC address at boot.
 2. **MAC address.** With or without separators, upper or lower case:
    `24:6F:28:12:34:56`, `24-6f-28-12-34-56` and `246f28123456` all mean the same
    board. The plugin normalises it and refuses two screens sharing one address.
-3. **Buttons tab.** Six slots, in the order of the 3×2 grid. For each one: a
-   label, a colour, an icon, and a **mode** — see below. The preview shows the
-   screen as the board will draw it, with each button's rank.
+3. **Buttons tab.** Up to four pages, twelve buttons per page, thirty-two in
+   all. The grid of each page is set in the Screen tab (3×3 by default); a
+   board whose firmware predates v2 can only draw 3×2 and only gets the first
+   six buttons. For each button: a label, a colour, an icon, and a **mode** —
+   see below. The preview shows the screen as the board will draw it, with
+   each button's rank.
 4. **Save.** The version counter goes up, and the board redraws at its next
    check.
 
