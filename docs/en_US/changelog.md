@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.2.1
+
+- The screens' API now only accepts the plugin's API key: a Jeedom user's
+  personal key used to be accepted as well.
+
 ## 3.2
 
 Hideable pages (contract 3.1). **No schema or firmware change**: a hidden page is

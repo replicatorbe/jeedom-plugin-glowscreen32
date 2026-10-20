@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.2.1
+
+- L'API des écrans n'accepte plus que la clé API du plugin : la clé
+  personnelle d'un utilisateur Jeedom y donnait aussi accès.
+
 ## 3.2
 
 Pages masquables (contrat v3.1). **Le schéma ne change pas, le firmware non

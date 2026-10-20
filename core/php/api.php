@@ -223,7 +223,11 @@ try {
 
     /* v3.1 : ?apikey[]=… arrive en TABLEAU — refusé net (401), sans le
      * passer au coeur. */
-    if (!is_string($apikey) || !jeedom::apiAccess($apikey, 'glowscreen32')) {
+    /* La seule clé du plugin : jeedom::apiAccess() accepterait aussi celle de
+     * n'importe quel utilisateur. apiAccess() reste appelé pour le mode
+     * d'accès du plugin réglé dans la configuration de l'API. */
+    if (!is_string($apikey) || !hash_equals(jeedom::getApiKey('glowscreen32'), $apikey)
+        || !jeedom::apiAccess($apikey, 'glowscreen32')) {
         $apikey = is_string($apikey) ? $apikey : '';
         /* Les huit premiers caractères suffisent à reconnaître une clé sans
          * l'écrire en clair dans un journal que d'autres peuvent lire. */
